@@ -183,4 +183,4 @@ The API keeps no state of its own; everything lives in Postgres. Budget decision
 
 - Runs on Solana's test networks only, never with real money.
 - The server holds the agents' test keys. Next version: the customer owns the wallet and the limits are enforced on Solana.
-- Seller data is made up. The CSV follows the DATEV layout loosely, not the official import format; the accounts are SKR03 examples to confirm with a tax advisor.
+- Seller data is made up.

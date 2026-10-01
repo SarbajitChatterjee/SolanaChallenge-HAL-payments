@@ -298,18 +298,18 @@ class Repository:
         with self.engine.begin() as conn:
             return conn.execute(delete(early_access).where(early_access.c.email == email)).rowcount == 1
 
-    def export_csv(self, *, expense_account: str, clearing_account: str) -> str:
-        """DATEV-style booking lines (simplified; not the EXTF import header format)."""
+    def export_csv(self) -> str:
+        """Paid purchases as a plain CSV: comma-separated, decimal point, one row per payment."""
         with self.engine.connect() as conn:
             rows = conn.execute(select(events).where(events.c.status == "settled")
                                 .order_by(events.c.created_at)).mappings().all()
         buf = io.StringIO()
-        w = csv.writer(buf, delimiter=";", lineterminator="\n")
-        w.writerow(["Umsatz", "Soll/Haben-Kennzeichen", "WKZ Umsatz", "Konto", "Gegenkonto", "Belegdatum",
-                    "Belegfeld 1", "Buchungstext", "Agent", "Task", "Tx-Signatur"])
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(["Date (UTC)", "Agent", "Task", "Item", "Seller", "Amount", "Currency", "Reference",
+                    "Solana receipt"])
         for r in rows:
-            w.writerow([money(r["amount_micros"]).replace(".", ","), "S", "USD", expense_account, clearing_account,
-                        r["created_at"].strftime("%d.%m.%Y"), f"AB-{r['id']}",
-                        f"{r['vendor'] or ''} {r['tool'] or ''}".strip()[:60], r["agent_id"], r["task_id"],
+            created = r["created_at"] if r["created_at"].tzinfo else r["created_at"].replace(tzinfo=timezone.utc)
+            w.writerow([created.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), r["agent_id"], r["task_id"],
+                        r["tool"] or "", r["vendor"] or "", money(r["amount_micros"]), "USDC", f"AB-{r['id']}",
                         r["tx"] or ""])
         return buf.getvalue()

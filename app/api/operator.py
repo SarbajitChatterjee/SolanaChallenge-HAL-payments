@@ -67,9 +67,7 @@ async def unfreeze(agent_id: str, request: Request):
 
 @router.get("/ledger.csv", response_class=PlainTextResponse)
 async def ledger_csv(request: Request):
-    catalog = request.app.state.catalog
-    text = await asyncio.to_thread(request.app.state.repo.export_csv, expense_account=catalog.expense_account,
-                                   clearing_account=catalog.clearing_account)
+    text = await asyncio.to_thread(request.app.state.repo.export_csv)
     return PlainTextResponse(text, media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": 'attachment; filename="agentbudget-ledger.csv"'})
 

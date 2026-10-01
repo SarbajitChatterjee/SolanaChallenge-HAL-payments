@@ -118,7 +118,8 @@ def test_ledger_export(api):
     call(api, tool="company_lookup")
     call(api, url="http://127.0.0.1:8001/shady/full-dossier")
     lines = api.get("/v1/ledger.csv", headers=OP_H).text.strip().splitlines()
-    assert len(lines) == 2 and lines[1].startswith("0,05;S;USD;4900;1360;")
+    assert lines[0] == "Date (UTC),Agent,Task,Item,Seller,Amount,Currency,Reference,Solana receipt"
+    assert len(lines) == 2 and ",research-agent,t1,company_lookup,Registry Data (demo),0.05,USDC,AB-" in lines[1]
 
 
 

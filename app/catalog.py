@@ -1,4 +1,4 @@
-"""Vendor catalog and agent policies (a JSON file, so changing a budget is a config change, not a code change)."""
+# Vendor catalog and agent policies 
 
 from __future__ import annotations
 
@@ -16,8 +16,6 @@ DEFAULT_PATH = Path(__file__).with_name("catalog.json")
 class Catalog:
     items: dict[str, CatalogItem]
     agents: dict[str, AgentPolicy]
-    expense_account: str
-    clearing_account: str
 
 
 def load_catalog(path: str | None, vendor_base: str) -> Catalog:
@@ -39,5 +37,4 @@ def load_catalog(path: str | None, vendor_base: str) -> Catalog:
     unknown = {t for a in agents.values() for t in a.allowed_tools} - items.keys()
     if unknown:
         raise ValueError(f"Agents reference tools missing from the catalog: {sorted(unknown)}")
-    acct = raw.get("accounting", {})
-    return Catalog(items, agents, acct.get("expense_account", "4900"), acct.get("clearing_account", "1360"))
+    return Catalog(items, agents)
