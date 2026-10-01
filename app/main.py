@@ -6,8 +6,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import agent, operator, public
+from .api import agent, operator, public, rules as rules_api
 from .catalog import load_catalog
+from .rules import Rules
 from .db import Repository
 from .demo import DemoRunner
 from .ratelimit import RateLimiter
@@ -17,13 +18,13 @@ from .schemas import HealthView
 from .service import SpendService
 from .settings import Settings
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 log = logging.getLogger("agentbudget")
 
 
 def build_rail(s: Settings) -> PaymentRail:
     if s.rail == "paykit":
-        return PayKitRail(network=s.network, rpc_url=s.rpc_url, wallet_keys=s.wallet_key_map,
+        return PayKitRail(network=s.network, rpc_url=s.rpc_url, wallet_key_for=s.wallet_key_for,
                           wallets_dir=s.wallets_dir)
     return MockRail()
 
@@ -34,19 +35,23 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
     for noisy in ("httpx", "httpx2", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     s = settings or Settings()
-    catalog = load_catalog(s.catalog_path, s.vendor_base)
-    s.resolve_keys(tuple(catalog.agents))
-    s.check(tuple(catalog.agents))
+    s.check(tuple(load_catalog(s.catalog_path, s.vendor_base).agents))  # settings problems, before any DB work
     repo = repo or Repository(s.database_url)
     repo.init_schema()
-    repo.seed_agents(catalog.agents)
+    rules = Rules(repo, s.vendor_base, s.catalog_path)
+    rules.seed_if_empty()                       # first start: the starting rules from catalog.json
+    repo.seed_agents(rules.catalog().agents)    # a kill-switch row for every agent
+    s.check(tuple(rules.catalog().agents))      # agents added on the dashboard need keys too
     rail = rail or build_rail(s)
 
-    async def topup() -> None:
-        """Best-effort sandbox top-up; never blocks startup or the demo."""
+    async def topup(only: str | None = None) -> None:
+        """Test network: give agent wallets their daily budget in test USDC. Best effort, never blocks."""
         if isinstance(rail, PayKitRail) and s.sandbox_autofund:
+            agents = rules.catalog().agents
+            if only is not None:
+                agents = {only: agents[only]} if only in agents else {}
             try:
-                await autofund(rail, catalog)
+                await autofund(rail, agents)
             except Exception as exc:  # noqa: BLE001
                 log.warning("sandbox top-up skipped: %s", exc)
 
@@ -63,10 +68,10 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
                               "person sets: approved sellers, agreed prices, budgets, approval limits and a "
                               "kill switch.")
     app.state.settings = s
-    app.state.catalog = catalog
+    app.state.rules = rules
     app.state.repo = repo
     app.state.rail = rail
-    app.state.service = SpendService(repo, rail, catalog, s.explorer_tx_url)
+    app.state.service = SpendService(repo, rail, rules, s.explorer_tx_url)
     app.state.demo = DemoRunner()
     app.state.topup = topup
     app.state.limiter = RateLimiter()
@@ -75,7 +80,7 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
         CORSMiddleware,
         allow_origins=s.origins,
         allow_origin_regex=s.allowed_origin_regex,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
         expose_headers=["Content-Disposition"],
         max_age=600,
@@ -100,4 +105,5 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
     app.include_router(agent.router)
     app.include_router(operator.router)
     app.include_router(operator.key_router)
+    app.include_router(rules_api.router)
     return app

@@ -1,4 +1,6 @@
-# Dashboard endpoints: operator token required, or open when PUBLIC_DEMO=true (sandbox judging).
+''' 
+Dashboard endpoints: operator token required, or open when PUBLIC_DEMO=true (sandbox judging).
+'''
 
 from __future__ import annotations
 
@@ -13,14 +15,14 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..db import iso
 from ..ratelimit import limit
 from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, StateView
-from ..security import require_operator, require_operator_token
+from ..security import actor_of, require_operator, require_operator_token
 from ..service import CallRequest
 
 router = APIRouter(prefix="/v1", tags=["operator"], dependencies=[Depends(require_operator)])
 
 
 def _known_agent(request: Request, agent_id: str) -> None:
-    if agent_id not in request.app.state.catalog.agents:
+    if agent_id not in request.app.state.service.catalog.agents:
         raise HTTPException(404, f"Unknown agent '{agent_id}'.")
 
 
@@ -87,11 +89,32 @@ async def run_demo(request: Request, mode: Literal["tour", "auto"] = "tour", aut
         if await is_frozen(agent_id):
             await asyncio.to_thread(repo.set_frozen, agent_id, False)
 
+    if not request.app.state.demo.running and not request.app.state.rules.demo_rules_intact():
+        raise HTTPException(409, "The demo rules were changed. Press Reset demo first, then start the tour.")
+    keys = {a: s.agent_key_for(a) for a in ("research-agent", "intern-agent")}
     started = request.app.state.demo.start(
-        request.app, s.agent_key_map, s.operator_token.get_secret_value() if s.operator_token else None,
+        request.app, keys, s.operator_token.get_secret_value() if s.operator_token else None,
         mode=mode, auto_approve=auto_approve, is_frozen=is_frozen, unfreeze=unfreeze_agent,
         before=request.app.state.topup)
     return _demo_view(request, started)
+
+
+@router.post("/demo/reset")
+async def demo_reset(request: Request):
+    """Demo only: clear purchases and approvals, restore the starting rules, release every kill switch,
+    top up the test wallets. Sign-ups and the change history are kept."""
+    s = request.app.state.settings
+    if not s.demo_enabled:
+        raise HTTPException(403, "The demo is switched off on this server.")
+    request.app.state.demo.stop()
+    for _ in range(40):
+        if not request.app.state.demo.running:
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.to_thread(request.app.state.rules.reset_demo, actor=actor_of(request))
+    await request.app.state.topup()
+    return {"ok": True, "message": "Demo reset: purchases cleared, starting rules restored, "
+                                   "all agents running, test wallets topped up."}
 
 
 @router.post("/demo/next", response_model=DemoView)
@@ -165,5 +188,5 @@ async def agent_key(agent_id: str, request: Request):
     s = request.app.state.settings
     _known_agent(request, agent_id)
     rail = request.app.state.rail
-    return {"agent_id": agent_id, "agent_key": s.agent_key_map.get(agent_id),
+    return {"agent_id": agent_id, "agent_key": s.agent_key_for(agent_id),
             "wallet_address": request.app.state.service._wallet_address(agent_id) if rail.name == "paykit" else None}

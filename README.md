@@ -41,7 +41,17 @@ Agents can now pay for data per request: a company record for 5 cents, an exchan
 | Allowed items per agent | Each agent can only buy what it was allowed to buy. |
 | Receipts | Every paid purchase is in the ledger with its Solana receipt, and exports as a CSV for the accountant. |
 
+All of these are set per agent and per item on the dashboard's **Rules** page. Changes are checked (a task budget can't exceed the daily budget, prices must be above zero, ...), apply to the very next purchase, and are written to a change history. Agents and items are archived, never deleted, so the ledger keeps its meaning.
+
 Every answer comes with a `reason_code` for software and a `reason` in plain words, e.g. *"This seller isn't on the approved list, so nothing was paid."*
+
+## Using it with your own agent
+
+1. **Add your agent** on the Rules page: what it may buy, its task and daily budgets, and above which amount it needs your OK. It gets its own key and wallet automatically (`GET /v1/agents/{agent_id}/key`).
+2. **Add the sellers** your agent buys from: their address and the price you agreed to. Any service that takes payment per request on Solana works.
+3. **Fill the wallet.** On the test network this happens automatically. With real money it would be USDC sent to the agent's wallet address.
+4. **Change one line in your agent:** ask AgentBudget instead of calling the seller directly (below).
+5. **Watch the dashboard:** approve big purchases, flip the kill switch, download the ledger.
 
 ## Connect your agent
 
@@ -77,7 +87,8 @@ app/
   demo.py         runs the tour (visitor-driven) or the full demo (automatic)
   ratelimit.py    limits for public endpoints
   sandbox.py      tops up agent wallets on the Solana test network
-  catalog.json    what agents can buy, agreed prices, agent rules
+  rules.py        rules editing: validation, change history, demo reset
+  catalog.json    the starting rules: fills an empty database, and Reset demo restores them
   api/            public.py, agent.py, operator.py
 vendors/app.py    demo sellers: paid APIs behind a Solana paywall (its own service)
 scripts/          generate_secrets.py (optional key overrides), fund_sandbox.py
@@ -137,6 +148,11 @@ If something is missing, the API doesn't start, and its log lists every missing 
 | POST | `/v1/demo/next`, `/v1/demo/stop` | operator | Run the next tour step, or end the tour |
 | GET | `/v1/demo` | operator | Where the tour is and what it's waiting for |
 | POST | `/v1/playground/buy` | operator | "Be the agent": try a purchase as a demo agent |
+| POST | `/v1/demo/reset` | operator | Demo only: clear purchases, restore the starting rules, release kill switches, refill test wallets |
+| GET | `/v1/rules` | operator | All agents and items, including archived ones |
+| POST | `/v1/rules/agents`, `/v1/rules/items` | operator | Add an agent or an item |
+| PATCH | `/v1/rules/agents/{agent_id}`, `/v1/rules/items/{tool}` | operator | Change rules, or archive with `{"active": false}` |
+| GET | `/v1/rules/history` | operator | Who changed which rule, when, from what to what |
 | GET | `/v1/early-access`, `/v1/early-access.csv` | operator | Sign-ups |
 | GET | `/v1/agents/{agent_id}/key` | operator token only | An agent's key and wallet address, to connect a real agent |
 | DELETE | `/v1/early-access/{email}` | operator | Delete a sign-up on request |
@@ -174,7 +190,7 @@ The API keeps no state of its own; everything lives in Postgres. Budget decision
 | `RPC_URL` | sandbox | Solana RPC |
 | `VENDOR_BASE` | `http://127.0.0.1:8001` | The demo sellers' public URL |
 | `SANDBOX_AUTOFUND` | `true` | Top up agent wallets on the sandbox at startup and before each demo |
-| `CATALOG_PATH` | `app/catalog.json` | Items, prices, agent rules |
+| `CATALOG_PATH` | `app/catalog.json` | The starting rules (the live rules are in the database) |
 | `EXPLORER_TX_URL` | automatic | Receipt link template with `{tx}` |
 | `DEMO_ENABLED` | `true` | The guided tour and demo |
 | `AGENT_KEYS`, `AGENT_WALLET_KEYS` | none | Optional overrides per agent (`scripts/generate_secrets.py`) |

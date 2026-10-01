@@ -1,7 +1,7 @@
-"""
-Two kinds of callers, two credentials:
-- agents call /v1/agents/{agent_id}/call with their own key
+"""Two kinds of callers, two credentials:
+- agents call /v1/agents/{agent_id}/call with their own key (an agent can only spend as itself)
 - the operator dashboard calls everything else with the operator token
+Both are bearer tokens compared in constant time.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def _matches(given: str | None, expected: str | None) -> bool:
 def require_agent(agent_id: str, request: Request,
                   creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> None:
     settings = request.app.state.settings
-    if not _matches(creds.credentials if creds else None, settings.agent_key_map.get(agent_id)):
+    if not _matches(creds.credentials if creds else None, settings.agent_key_for(agent_id)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or missing agent key.",
                             headers={"WWW-Authenticate": "Bearer"})
 
@@ -44,3 +44,12 @@ def require_operator_token(request: Request, creds: HTTPAuthorizationCredentials
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             "This needs the operator token (PUBLIC_DEMO doesn't open it).",
                             headers={"WWW-Authenticate": "Bearer"})
+
+
+def actor_of(request: Request) -> str:
+    """'operator' when the real operator token was sent, otherwise 'demo visitor' (PUBLIC_DEMO)."""
+    settings = request.app.state.settings
+    token = settings.operator_token.get_secret_value() if settings.operator_token else None
+    header = request.headers.get("authorization", "")
+    given = header[7:] if header.lower().startswith("bearer ") else None
+    return "operator" if _matches(given, token) else "demo visitor"
