@@ -1,8 +1,3 @@
-"""AgentBudget API.
-
-    uvicorn app.main:create_app --factory --port 8000
-"""
-
 from __future__ import annotations
 
 import logging
@@ -39,8 +34,9 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
     for noisy in ("httpx", "httpx2", "httpcore"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     s = settings or Settings()
-    s.check()
     catalog = load_catalog(s.catalog_path, s.vendor_base)
+    s.resolve_keys(tuple(catalog.agents))
+    s.check(tuple(catalog.agents))
     repo = repo or Repository(s.database_url)
     repo.init_schema()
     repo.seed_agents(catalog.agents)
@@ -97,10 +93,11 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
     async def health():
         return HealthView(ok=True, version=VERSION, rail=rail.name, network=getattr(rail, "network", None),
                           database="postgres" if repo.is_postgres else "sqlite",
-                          auth_required=not s.public_demo and (s.operator_token is not None or s.app_env == "prod"),
+                          auth_required=not s.public_demo,
                           demo_enabled=s.demo_enabled)
 
     app.include_router(public.router)
     app.include_router(agent.router)
     app.include_router(operator.router)
+    app.include_router(operator.key_router)
     return app

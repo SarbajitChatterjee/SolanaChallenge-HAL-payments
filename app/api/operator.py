@@ -1,4 +1,4 @@
-"""Dashboard endpoints: operator token required, or open when PUBLIC_DEMO=true (sandbox judging)."""
+# Dashboard endpoints: operator token required, or open when PUBLIC_DEMO=true (sandbox judging).
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from ..db import iso
 from ..ratelimit import limit
 from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, StateView
-from ..security import require_operator
+from ..security import require_operator, require_operator_token
 from ..service import CallRequest
 
 router = APIRouter(prefix="/v1", tags=["operator"], dependencies=[Depends(require_operator)])
@@ -155,3 +155,17 @@ async def early_access_delete(email: str, request: Request):
     if not await asyncio.to_thread(request.app.state.repo.delete_early_access, email.strip().lower()):
         raise HTTPException(404, "No sign-up with that email.")
     return {"deleted": True}
+
+
+# ---- connecting a real agent in the sandbox ---------------------------------------------------
+key_router = APIRouter(prefix="/v1", tags=["operator"])
+
+
+@key_router.get("/agents/{agent_id}/key", dependencies=[Depends(require_operator_token)])
+async def agent_key(agent_id: str, request: Request):
+    """Show an agent's key and wallet address, so you can connect a real agent (operator token only)."""
+    s = request.app.state.settings
+    _known_agent(request, agent_id)
+    rail = request.app.state.rail
+    return {"agent_id": agent_id, "agent_key": s.agent_key_map.get(agent_id),
+            "wallet_address": request.app.state.service._wallet_address(agent_id) if rail.name == "paykit" else None}

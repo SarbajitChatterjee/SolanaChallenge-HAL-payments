@@ -184,7 +184,7 @@ class SpendService:
                 "approval_above": usd(a.approval_above),
                 "spent_today": usd(self.repo.spent(a.agent_id, since=since)),
                 "current_task": {"task_id": current[0], "spent": usd(current[1])} if current else None,
-                "wallet_address": self.rail.pubkey(a.agent_id) if self.rail.name == "paykit" else None,
+                "wallet_address": self._wallet_address(a.agent_id),
                 "wallet_usdc": None,
             })
         approvals = [{
@@ -201,6 +201,15 @@ class SpendService:
         } for r in self.repo.recent_events()]
         return {"rail": self.rail.name, "network": getattr(self.rail, "network", None),
                 "agents": agents, "approvals": approvals, "events": events}
+
+    def _wallet_address(self, agent_id: str) -> str | None:
+        """Display only: a missing key must never take the dashboard down."""
+        if self.rail.name != "paykit":
+            return None
+        try:
+            return self.rail.pubkey(agent_id)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _name(self, tool: str | None) -> str | None:
         item = self.catalog.items.get(tool or "")

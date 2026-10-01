@@ -242,7 +242,10 @@ def _cli() -> None:
     parser.add_argument("--base-url", default=os.getenv("API_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--auto-approve", action="store_true")
     args = parser.parse_args()
+    from .catalog import load_catalog
+
     settings = Settings()
+    settings.resolve_keys(tuple(load_catalog(settings.catalog_path, settings.vendor_base).agents))
     op_token = settings.operator_token.get_secret_value() if settings.operator_token else None
 
     async def main() -> None:

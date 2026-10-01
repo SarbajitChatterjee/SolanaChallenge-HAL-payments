@@ -67,11 +67,11 @@ A complete example agent (Claude) is in [`examples/claude_agent.py`](examples/cl
 ```
 app/
   main.py         app setup: config checks, CORS, security headers, routers
-  settings.py     every setting from environment variables, with safety checks for production
+  settings.py     every setting from environment variables; refuses to start if something is missing
   security.py     agent keys and the operator token
   policy.py       the rules: pure decision logic with reason codes and plain messages
   service.py      the purchase flow: lock, decide, reserve, pay, settle or release
-  db.py           storage (SQLite for development, Supabase Postgres in production)
+  db.py           storage: Supabase Postgres (SQLite only for the automated tests)
   rails.py        Solana payments through Solana Pay Kit (plus a mock for tests)
   tour.py         the guided tour's steps, in plain words (one place for all tour text)
   demo.py         runs the tour (visitor-driven) or the full demo (automatic)
@@ -80,7 +80,7 @@ app/
   catalog.json    what agents can buy, agreed prices, agent rules
   api/            public.py, agent.py, operator.py
 vendors/app.py    demo sellers: paid APIs behind a Solana paywall (its own service)
-scripts/          generate_secrets.py, fund_sandbox.py
+scripts/          generate_secrets.py (optional key overrides), fund_sandbox.py
 examples/         claude_agent.py
 supabase/         schema.sql (optional; the API creates its tables itself)
 docs/             product brief, pitch, plan, Lovable prompt, diagrams
@@ -88,54 +88,36 @@ tests/            rules, API, tour, playground, early access; run on SQLite and 
 render.yaml       Render Blueprint for both services
 ```
 
-## Run locally
+## Deploy and test on Render
 
-Python 3.11+.
-
-```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt -r requirements-dev.txt
-cp .env.example .env
-python -m pytest                                        # add TEST_POSTGRES_URL=... to also test Postgres
-```
-
-Two terminals (mock payments, SQLite):
-
-```bash
-PAYWALL=off uvicorn vendors.app:app --port 8001
-uvicorn app.main:create_app --factory --port 8000 --reload
-```
-
-Then open http://127.0.0.1:8000/docs, or run the whole demo in the terminal: `python -m app.demo --auto-approve`.
-
-**Real USDC payments on the Solana test network:**
-1. Run `python scripts/generate_secrets.py`.
-2. Put its three values plus `RAIL=paykit` in `.env`.
-3. Start the sellers without `PAYWALL=off`.
-
-On startup the API tops up each agent wallet with its daily budget.
-
-## Deploy
+Everything runs on Render. New work goes on a branch: point both services at that branch, test, merge into `main`, then point them back at `main`.
 
 **1. Supabase (database)**
 1. Create a project in region *Central EU (Frankfurt)*.
 2. Click **Connect** and copy the **Session pooler** connection string.
 3. Turn it into `DATABASE_URL`: replace `postgresql://` with `postgresql+psycopg://` and add `?sslmode=require`.
 
-The API creates its tables on first start.
+The API creates its tables on first start. Nothing else to set up.
 
 **2. Render (API and demo sellers)**
-1. Push this repo to GitHub, then go to Render → **New → Blueprint** and pick the repo.
-2. Run `python scripts/generate_secrets.py` locally.
-3. In the API's environment, paste `OPERATOR_TOKEN`, `AGENT_KEYS`, `AGENT_WALLET_KEYS` and `DATABASE_URL`.
-4. Set `VENDOR_BASE` to the sellers' public URL, then redeploy the API.
-5. Check `https://<api>/health` and `https://<api>/docs`.
+1. Render → **New → Blueprint**, then pick the repo. It creates `agentbudget-api` and `agentbudget-vendors`, and generates `APP_SECRET` and `OPERATOR_TOKEN` by itself.
+2. Open **agentbudget-api → Environment** and set:
+   - `DATABASE_URL`
+   - `VENDOR_BASE`: the vendors service's URL
+   - `ALLOWED_ORIGINS`: the Lovable app's URL
+   - `ALLOWED_ORIGIN_REGEX`: value in [`.env.example`](.env.example)
+3. Redeploy. Then check `https://<api>/health` and `https://<api>/docs`.
+
+If something is missing, the API doesn't start, and its log lists every missing setting with the fix.
 
 **3. Lovable (web app)**
 1. Paste [`docs/LOVABLE_PROMPT.md`](docs/LOVABLE_PROMPT.md) into a new project.
-2. Set the API URL, the GitHub URL and the diagram URL in `src/config.ts`.
-3. Publish, then add the app's URL to `ALLOWED_ORIGINS` on Render, and set
-   `ALLOWED_ORIGIN_REGEX=https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)` so Lovable's preview links work too.
+2. Set the API URL, the GitHub URL and the diagram path in `src/config.ts`.
+3. Publish, then put the app's URL in `ALLOWED_ORIGINS` on Render.
+
+**Branch testing notes**
+- Switching a branch keeps the environment variables. Both branches use the same database, so don't run two branches at the same time against it.
+- The automated tests run with `python -m pytest` (SQLite and a mock payment rail, no Render needed). Never point `TEST_POSTGRES_URL` at Supabase: the tests wipe their schema.
 
 ## API
 
@@ -156,16 +138,18 @@ The API creates its tables on first start.
 | GET | `/v1/demo` | operator | Where the tour is and what it's waiting for |
 | POST | `/v1/playground/buy` | operator | "Be the agent": try a purchase as a demo agent |
 | GET | `/v1/early-access`, `/v1/early-access.csv` | operator | Sign-ups |
+| GET | `/v1/agents/{agent_id}/key` | operator token only | An agent's key and wallet address, to connect a real agent |
 | DELETE | `/v1/early-access/{email}` | operator | Delete a sign-up on request |
 
-"Operator" means the operator token, or no token when the server runs with `PUBLIC_DEMO=true` (for judging on the test network). Full schemas at `/docs`.
+"Operator" means the operator token, or no token when `PUBLIC_DEMO=true` (for judging). Revealing agent keys always needs the real token. Full schemas at `/docs`.
 
 ## Security
 
-- **Two kinds of keys.** Agents spend only as themselves. The dashboard uses a separate operator token.
+- **Test networks only.** The code accepts only Solana's localnet sandbox or devnet. No setting can make it move real money.
+- **Two kinds of keys.** Agents spend only as themselves, with keys derived from `APP_SECRET`. The dashboard uses a separate operator token.
+- **Secrets only in Render's environment.** Render generates `APP_SECRET` and `OPERATOR_TOKEN`. Nothing secret is in the repo.
 - **The browser never touches the database.** Tables live in a private schema that Supabase's public API doesn't expose, with row-level security on.
-- **Secrets only in Render's environment.** Mainnet is switched off in this MVP.
-- **Safe defaults in production.** The API refuses to start without keys, with an open CORS setting, or without Postgres.
+- **The API won't start half-configured.** Missing keys, a missing seller address or an open CORS setting stop it, with a clear list in the log.
 - **Public endpoints are rate-limited.** The sign-up form has a spam trap and gives the same answer whether or not an email is already on the list.
 - **`PUBLIC_DEMO=true`** lets judges approve and freeze without a token. Agents still need their keys. Turn it off after judging.
 
@@ -179,25 +163,24 @@ The API keeps no state of its own; everything lives in Postgres. Budget decision
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `APP_ENV` | `dev` | `prod` turns on the safety checks |
-| `DATABASE_URL` | SQLite file | Supabase session pooler URL in production |
-| `ALLOWED_ORIGINS` | localhost | Comma-separated web app origins |
-| `ALLOWED_ORIGIN_REGEX` | none | Lovable preview URLs: `https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)` |
-| `OPERATOR_TOKEN` | none | Dashboard actions |
+| `DATABASE_URL` | SQLite file (tests only) | Supabase session pooler URL |
+| `APP_SECRET` | none | One random string; each agent's key and test wallet are derived from it. Render generates it. |
+| `OPERATOR_TOKEN` | none | Dashboard actions, and revealing agent keys. Render generates it. |
 | `PUBLIC_DEMO` | `false` | Open dashboard actions for judges |
-| `AGENT_KEYS` | none | `agent:key,agent:key` |
-| `RAIL` | `mock` | `paykit` for real Solana payments |
-| `NETWORK` | `localnet` | `localnet` (Solana test network) or `devnet` |
-| `RPC_URL` | test network | Solana RPC |
-| `AGENT_WALLET_KEYS` | none | `agent:base58secret,...` (test networks only) |
-| `SANDBOX_AUTOFUND` | `true` | Top up wallets on the test network at startup and before each demo |
-| `VENDOR_BASE` | `http://127.0.0.1:8001` | Where the demo sellers run |
+| `ALLOWED_ORIGINS` | localhost | Comma-separated web app addresses |
+| `ALLOWED_ORIGIN_REGEX` | none | Lovable preview links: `https://([a-z0-9-]+\.)*(lovable\.app\|lovableproject\.com)` |
+| `RAIL` | `mock` | `paykit` for real USDC payments on the test network |
+| `NETWORK` | `localnet` | `localnet` (Solana sandbox) or `devnet` |
+| `RPC_URL` | sandbox | Solana RPC |
+| `VENDOR_BASE` | `http://127.0.0.1:8001` | The demo sellers' public URL |
+| `SANDBOX_AUTOFUND` | `true` | Top up agent wallets on the sandbox at startup and before each demo |
 | `CATALOG_PATH` | `app/catalog.json` | Items, prices, agent rules |
 | `EXPLORER_TX_URL` | automatic | Receipt link template with `{tx}` |
 | `DEMO_ENABLED` | `true` | The guided tour and demo |
+| `AGENT_KEYS`, `AGENT_WALLET_KEYS` | none | Optional overrides per agent (`scripts/generate_secrets.py`) |
 
 ## Honest limitations
 
-- Runs on the Solana test network, not with real money.
+- Runs on Solana's test networks only, never with real money.
 - The server holds the agents' test keys. Next version: the customer owns the wallet and the limits are enforced on Solana.
 - Seller data is made up. The CSV follows the DATEV layout loosely, not the official import format; the accounts are SKR03 examples to confirm with a tax advisor.

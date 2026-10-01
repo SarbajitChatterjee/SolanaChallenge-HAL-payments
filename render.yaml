@@ -1,4 +1,3 @@
-# Render Blueprint: New -> Blueprint -> pick this repo. Secrets marked sync:false are asked for on first deploy.
 services:
   - type: web
     name: agentbudget-api
@@ -11,8 +10,6 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
-      - key: APP_ENV
-        value: prod
       - key: RAIL
         value: paykit
       - key: NETWORK
@@ -29,12 +26,10 @@ services:
         sync: false
       - key: ALLOWED_ORIGIN_REGEX
         sync: false
-      - key: OPERATOR_TOKEN
-        sync: false
-      - key: AGENT_KEYS
-        sync: false
-      - key: AGENT_WALLET_KEYS
-        sync: false
+      - key: APP_SECRET             # agent keys and test wallets are derived from it
+        generateValue: true
+      - key: OPERATOR_TOKEN         # read it in Render -> Environment when you need it
+        generateValue: true
 
   - type: web
     name: agentbudget-vendors
