@@ -1,0 +1,28 @@
+{
+  "_comment": "Prices are agreed prices in USD. The API never signs a payment above them. {vendor_base} is replaced from VENDOR_BASE.",
+  "catalog": [
+    {"tool": "company_lookup", "url": "{vendor_base}/v1/company", "price": "0.05", "vendor": "Registry Data (demo)",
+     "name": "Company record", "description": "Register data for one company: legal name, founding year, status."},
+    {"tool": "fx_rate", "url": "{vendor_base}/v1/fx", "price": "0.01", "vendor": "FX Feed (demo)",
+     "name": "Exchange rate", "description": "Today's rate for one currency pair, e.g. EUR to USD."},
+    {"tool": "news_search", "url": "{vendor_base}/v1/news", "price": "0.05", "vendor": "News Wire (demo)",
+     "name": "News search", "description": "Recent headlines about a company."},
+    {"tool": "credit_report", "url": "{vendor_base}/v1/credit-report", "price": "0.50", "vendor": "Credit Bureau (demo)",
+     "name": "Credit report", "description": "Credit score and payment behaviour of a company."},
+    {"tool": "fx_realtime", "url": "{vendor_base}/v1/fx/realtime", "price": "0.01", "vendor": "FX Feed (demo)",
+     "name": "Live exchange rate", "description": "Agreed at 0.01 USD. In the demo the seller asks 0.10, so nothing is paid."}
+  ],
+  "agents": [
+    {"agent_id": "research-agent", "description": "Checks new suppliers before a first order.",
+     "allowed_tools": ["company_lookup", "fx_rate", "news_search", "credit_report", "fx_realtime"],
+     "per_task_cap": "0.75", "daily_cap": "25.00", "approval_above": "0.25"},
+    {"agent_id": "intern-agent", "description": "Looks up exchange rates and news. Nothing else.",
+     "allowed_tools": ["fx_rate", "news_search"],
+     "per_task_cap": "0.20", "daily_cap": "2.00", "approval_above": "0.05"}
+  ],
+  "accounting": {
+    "_comment": "Example SKR03 accounts for the accountant export. Confirm with your tax advisor.",
+    "expense_account": "4900",
+    "clearing_account": "1360"
+  }
+}
