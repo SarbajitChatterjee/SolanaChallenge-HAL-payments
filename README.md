@@ -134,7 +134,8 @@ The API creates its tables on first start.
 **3. Lovable (web app)**
 1. Paste [`docs/LOVABLE_PROMPT.md`](docs/LOVABLE_PROMPT.md) into a new project.
 2. Set the API URL, the GitHub URL and the diagram URL in `src/config.ts`.
-3. Publish, then add the app's URL to `ALLOWED_ORIGINS` on Render.
+3. Publish, then add the app's URL to `ALLOWED_ORIGINS` on Render, and set
+   `ALLOWED_ORIGIN_REGEX=https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)` so Lovable's preview links work too.
 
 ## API
 
@@ -181,7 +182,7 @@ The API keeps no state of its own; everything lives in Postgres. Budget decision
 | `APP_ENV` | `dev` | `prod` turns on the safety checks |
 | `DATABASE_URL` | SQLite file | Supabase session pooler URL in production |
 | `ALLOWED_ORIGINS` | localhost | Comma-separated web app origins |
-| `ALLOWED_ORIGIN_REGEX` | none | e.g. Lovable preview URLs |
+| `ALLOWED_ORIGIN_REGEX` | none | Lovable preview URLs: `https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)` |
 | `OPERATOR_TOKEN` | none | Dashboard actions |
 | `PUBLIC_DEMO` | `false` | Open dashboard actions for judges |
 | `AGENT_KEYS` | none | `agent:key,agent:key` |

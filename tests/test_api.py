@@ -121,3 +121,15 @@ def test_ledger_export(api):
     assert len(lines) == 2 and lines[1].startswith("0,05;S;USD;4900;1360;")
 
 
+
+
+def test_cors_regex_covers_lovable_previews(make_client):
+    with make_client(allowed_origins="https://agentbudget.lovable.app",
+                     allowed_origin_regex=r"https://([a-z0-9-]+\.)*(lovable\.app|lovableproject\.com)") as api:
+        def allowed(origin):
+            r = api.options("/v1/catalog", headers={"Origin": origin, "Access-Control-Request-Method": "GET"})
+            return r.headers.get("access-control-allow-origin") == origin
+        assert allowed("https://id-preview--1234abcd.lovable.app")
+        assert allowed("https://abcd1234.lovableproject.com")
+        assert not allowed("https://lovable.app.evil.example")
+        assert not allowed("http://agentbudget.lovable.app")  # plain http refused
