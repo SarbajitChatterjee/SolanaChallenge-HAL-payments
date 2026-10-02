@@ -168,8 +168,8 @@ class AgentTx:
 
     def record(self, *, task_id: str, decision: str, status: str, reason: str, reason_code: str,
                tool: str | None = None, url: str | None = None, vendor: str | None = None,
-               amount: Decimal | None = None) -> str:
-        event_id = new_id()
+               amount: Decimal | None = None, event_id: str | None = None) -> str:
+        event_id = event_id or new_id()
         self.conn.execute(insert(events).values(
             id=event_id, created_at=utcnow(), agent_id=self.agent_id, task_id=task_id, tool=tool, url=url,
             vendor=vendor, amount_micros=to_micros(amount), decision=decision, status=status, reason=reason,
@@ -258,8 +258,17 @@ class Repository:
 
     # ---- operator actions ----------------------------------------------------
     def decide_approval(self, approval_id: str, approve: bool) -> bool:
+        """Record the decision, and turn the waiting row in the statement into Approved or Denied.
+        (The waiting row has the same id as its approval.)"""
         with self.engine.begin() as conn:
-            return _transition(conn, approval_id, "pending", "approved" if approve else "denied")
+            if not _transition(conn, approval_id, "pending", "approved" if approve else "denied"):
+                return False
+            conn.execute(update(events).where(events.c.id == approval_id, events.c.status == "held").values(
+                status="approved" if approve else "denied", decision="allow" if approve else "deny",
+                reason_code="approved" if approve else "denied",
+                reason="A person approved this. The agent can now buy it." if approve
+                else "A person said no. Nothing was paid."))
+            return True
 
     def set_frozen(self, agent_id: str, frozen: bool) -> None:
         with self.engine.begin() as conn:

@@ -139,7 +139,7 @@ class SpendService:
             if verdict.decision is Decision.HOLD:
                 approval_id = tx.create_approval(task_id=req.task_id, tool=item.tool, vendor=item.vendor,
                                                  amount=item.price, reason=verdict.message)
-                tx.record(decision="hold", status="held", **common)
+                tx.record(decision="hold", status="held", event_id=approval_id, **common)  # same id: decision updates it
                 return answer(202, "hold", "pending", verdict.code.value, verdict.message, approval_id=approval_id,
                               amount=usd(item.price), item_name=item.name or item.tool)
 
