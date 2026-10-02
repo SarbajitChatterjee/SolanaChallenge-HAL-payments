@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -77,6 +78,42 @@ early_access = Table(
     Column("consent_at", DateTime(timezone=True), nullable=False),
 )
 
+
+agents = Table(
+    "agents", metadata,
+    Column("agent_id", String(64), primary_key=True),
+    Column("description", Text),
+    Column("allowed_tools", Text, nullable=False),          # JSON list of item ids
+    Column("per_task_cap_micros", BigInteger, nullable=False),
+    Column("daily_cap_micros", BigInteger, nullable=False),
+    Column("approval_above_micros", BigInteger, nullable=False),
+    Column("active", Boolean, nullable=False, default=True),  # archived agents keep their history
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+catalog_items = Table(
+    "catalog_items", metadata,
+    Column("tool", String(64), primary_key=True),
+    Column("name", String(80), nullable=False),
+    Column("description", Text),
+    Column("vendor", String(128), nullable=False),
+    Column("url", Text, nullable=False),                      # may contain {vendor_base}
+    Column("price_micros", BigInteger, nullable=False),
+    Column("active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+audit_log = Table(
+    "audit_log", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("actor", String(32), nullable=False),              # operator | demo visitor
+    Column("action", String(64), nullable=False),             # agent.created, item.updated, demo.reset, ...
+    Column("target", String(128)),
+    Column("details", Text),                                  # JSON: {"field": [old, new], ...}
+)
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -233,6 +270,109 @@ class Repository:
                 reason_code="kill_switch_on" if frozen else "kill_switch_off",
                 reason="Kill switch on: this agent can't buy anything." if frozen
                 else "Kill switch off: this agent can buy again."))
+
+    # ---- rules: agents and items (edited from the dashboard) -------------------------------------------
+    @staticmethod
+    def _agent_row(r) -> dict:
+        return {"agent_id": r["agent_id"], "description": r["description"] or "",
+                "allowed_tools": json.loads(r["allowed_tools"]),
+                "per_task_cap": from_micros(r["per_task_cap_micros"]), "daily_cap": from_micros(r["daily_cap_micros"]),
+                "approval_above": from_micros(r["approval_above_micros"]), "active": bool(r["active"]),
+                "created_at": r["created_at"], "updated_at": r["updated_at"]}
+
+    @staticmethod
+    def _item_row(r) -> dict:
+        return {"tool": r["tool"], "name": r["name"], "description": r["description"] or "", "vendor": r["vendor"],
+                "url": r["url"], "price": from_micros(r["price_micros"]), "active": bool(r["active"]),
+                "created_at": r["created_at"], "updated_at": r["updated_at"]}
+
+    @staticmethod
+    def _agent_values(a: dict) -> dict:
+        return {"agent_id": a["agent_id"], "description": a.get("description") or "",
+                "allowed_tools": json.dumps(sorted(a["allowed_tools"])),
+                "per_task_cap_micros": to_micros(Decimal(str(a["per_task_cap"]))),
+                "daily_cap_micros": to_micros(Decimal(str(a["daily_cap"]))),
+                "approval_above_micros": to_micros(Decimal(str(a["approval_above"]))),
+                "active": a.get("active", True)}
+
+    @staticmethod
+    def _item_values(i: dict) -> dict:
+        return {"tool": i["tool"], "name": i.get("name") or i["tool"], "description": i.get("description") or "",
+                "vendor": i["vendor"], "url": i["url"], "price_micros": to_micros(Decimal(str(i["price"]))),
+                "active": i.get("active", True)}
+
+    def list_agents(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.agent_id)).mappings().all()
+        return [self._agent_row(r) for r in rows]
+
+    def list_items(self) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(catalog_items).order_by(catalog_items.c.tool)).mappings().all()
+        return [self._item_row(r) for r in rows]
+
+    def seed_rules_if_empty(self, seed: dict) -> bool:
+        """Fill an empty rules table from catalog.json. Never overwrites rules edited on the dashboard."""
+        with self.engine.begin() as conn:
+            if conn.execute(select(func.count()).select_from(agents)).scalar_one() or \
+               conn.execute(select(func.count()).select_from(catalog_items)).scalar_one():
+                return False
+            self._insert_seed(conn, seed)
+        return True
+
+    def _insert_seed(self, conn: Connection, seed: dict) -> None:
+        now = utcnow()
+        for i in seed["items"]:
+            conn.execute(insert(catalog_items).values(**self._item_values(i), created_at=now, updated_at=now))
+        for a in seed["agents"]:
+            conn.execute(insert(agents).values(**self._agent_values(a), created_at=now, updated_at=now))
+            if not conn.execute(select(agent_state.c.agent_id).where(agent_state.c.agent_id == a["agent_id"])).first():
+                conn.execute(insert(agent_state).values(agent_id=a["agent_id"], frozen=False))
+
+    def create_agent(self, a: dict) -> None:
+        now = utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(insert(agents).values(**self._agent_values(a), created_at=now, updated_at=now))
+            if not conn.execute(select(agent_state.c.agent_id).where(agent_state.c.agent_id == a["agent_id"])).first():
+                conn.execute(insert(agent_state).values(agent_id=a["agent_id"], frozen=False))
+
+    def update_agent(self, a: dict) -> None:
+        values = self._agent_values(a)
+        values.pop("agent_id")
+        with self.engine.begin() as conn:
+            conn.execute(update(agents).where(agents.c.agent_id == a["agent_id"]).values(**values, updated_at=utcnow()))
+
+    def create_item(self, i: dict) -> None:
+        now = utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(insert(catalog_items).values(**self._item_values(i), created_at=now, updated_at=now))
+
+    def update_item(self, i: dict) -> None:
+        values = self._item_values(i)
+        values.pop("tool")
+        with self.engine.begin() as conn:
+            conn.execute(update(catalog_items).where(catalog_items.c.tool == i["tool"])
+                         .values(**values, updated_at=utcnow()))
+
+    # ---- change history ------------------------------------------------------------------------------------
+    def add_audit(self, *, actor: str, action: str, target: str | None, details: dict | None = None) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(insert(audit_log).values(id=new_id(), created_at=utcnow(), actor=actor, action=action,
+                                                  target=target, details=json.dumps(details or {}, default=str)))
+
+    def list_audit(self, limit: int = 100) -> list[dict]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(audit_log).order_by(audit_log.c.created_at.desc()).limit(limit)).mappings().all()
+        return [{**dict(r), "details": json.loads(r["details"] or "{}")} for r in rows]
+
+    # ---- demo reset ------------------------------------------------------------------------------------------
+    def reset_demo(self, seed: dict) -> None:
+        """Clear purchases and approvals, put the starting rules back, release every kill switch.
+        Sign-ups and the change history are kept."""
+        with self.engine.begin() as conn:
+            for table in (events, approvals, agents, catalog_items, agent_state):
+                conn.execute(delete(table))
+            self._insert_seed(conn, seed)
 
     # ---- reads ---------------------------------------------------------------
     def frozen_map(self) -> dict[str, bool]:

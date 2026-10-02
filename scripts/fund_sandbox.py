@@ -17,6 +17,6 @@ from app.sandbox import autofund  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
 s = Settings()
-rail = PayKitRail(network=s.network, rpc_url=s.rpc_url, wallet_keys=s.wallet_key_map, wallets_dir=s.wallets_dir)
-asyncio.run(autofund(rail, load_catalog(s.catalog_path, s.vendor_base)))
+rail = PayKitRail(network=s.network, rpc_url=s.rpc_url, wallet_key_for=s.wallet_key_for, wallets_dir=s.wallets_dir)
+asyncio.run(autofund(rail, load_catalog(s.catalog_path, s.vendor_base).agents))
 print("Funded:", ", ".join(f"{a} {rail.pubkey(a)}" for a in load_catalog(s.catalog_path, s.vendor_base).agents))

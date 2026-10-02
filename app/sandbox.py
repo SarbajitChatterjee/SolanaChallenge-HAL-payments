@@ -10,7 +10,7 @@ import logging
 
 import httpx
 
-from .catalog import Catalog
+from .policy import AgentPolicy
 from .rails import PayKitRail
 
 log = logging.getLogger("agentbudget.sandbox")
@@ -21,7 +21,7 @@ def is_sandbox(rpc_url: str) -> bool:
     return any(h in rpc_url for h in ("surfnet", "localhost", "127.0.0.1"))
 
 
-async def autofund(rail: PayKitRail, catalog: Catalog) -> None:
+async def autofund(rail: PayKitRail, agents: dict[str, AgentPolicy]) -> None:
     if rail.network != "localnet" or not is_sandbox(rail.rpc_url):
         return
     from solana_pay_kit._paycore import mints
@@ -29,7 +29,7 @@ async def autofund(rail: PayKitRail, catalog: Catalog) -> None:
     usdc = mints.resolve("USDC", "localnet")
     token_program = mints.token_program_for("USDC", "localnet")
     async with httpx.AsyncClient(timeout=20) as http:
-        for agent_id, policy in catalog.agents.items():
+        for agent_id, policy in agents.items():
             pubkey = rail.pubkey(agent_id)
             calls = [
                 ("surfnet_setAccount", [pubkey, {"lamports": 50_000_000, "data": "", "executable": False,

@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .catalog import Catalog
+from .rules import Rules
 from .db import Repository, iso, money, start_of_day
 from .policy import CatalogItem, Decision, SpendRequest, evaluate, usd
 from .rails import PaymentRail, PriceRejected
@@ -52,11 +53,11 @@ def answer(status_code: int, decision: str, status: str, code: str, reason: str,
 
 
 class SpendService:
-    def __init__(self, repo: Repository, rail: PaymentRail, catalog: Catalog,
+    def __init__(self, repo: Repository, rail: PaymentRail, rules: Rules,
                  explorer_tx_url: str | None = None) -> None:
         self.repo = repo
         self.rail = rail
-        self.catalog = catalog
+        self.rules = rules
         self.explorer_tx_url = explorer_tx_url
         # Per-process lock per agent. The DB row lock covers several instances; this covers SQLite.
         self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
@@ -90,8 +91,16 @@ class SpendService:
                       tool=item.tool, item_name=item.name or item.tool, tx=result.tx,
                       explorer_url=self.explorer_url(result.tx), data=result.data)
 
+    @property
+    def catalog(self) -> Catalog:
+        """The live rules (edited on the dashboard)."""
+        return self.rules.catalog()
+
     def _decide_and_reserve(self, agent_id: str, req: CallRequest) -> Outcome | _Reserved:
-        policy = self.catalog.agents[agent_id]
+        catalog = self.catalog  # one consistent snapshot for this purchase
+        policy = catalog.agents.get(agent_id)
+        if policy is None:
+            return Outcome(404, {"detail": f"Unknown agent '{agent_id}'."})
         with self._locks[agent_id], self.repo.agent_tx(agent_id) as tx:
             approved = False
             if req.approval_id:
@@ -110,7 +119,7 @@ class SpendService:
 
             verdict = evaluate(
                 SpendRequest(agent_id=agent_id, task_id=req.task_id, tool=req.tool, url=req.url),
-                policy=policy, catalog=self.catalog.items,
+                policy=policy, catalog=catalog.items,
                 spent_task=tx.spent(task_id=req.task_id), spent_today=tx.spent(since=start_of_day()),
                 frozen=tx.is_frozen(), approved=approved)
             item = verdict.item
@@ -212,5 +221,4 @@ class SpendService:
             return None
 
     def _name(self, tool: str | None) -> str | None:
-        item = self.catalog.items.get(tool or "")
-        return (item.name or item.tool) if item else tool
+        return self.rules.item_name(tool)

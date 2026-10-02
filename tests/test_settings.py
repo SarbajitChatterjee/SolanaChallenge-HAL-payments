@@ -15,7 +15,6 @@ RENDER = dict(database_url="postgresql+psycopg://u:p@db.example:5432/postgres?ss
 
 def problems(**overrides):
     s = Settings(_env_file=None, **{**RENDER, **overrides})
-    s.resolve_keys(AGENTS)
     try:
         s.check(AGENTS)
     except RuntimeError as exc:
@@ -56,19 +55,20 @@ def test_mock_payments_need_no_wallets_or_seller_address():
 
 
 def test_derived_keys_are_stable_distinct_and_load_as_wallets():
-    a = Settings(_env_file=None, **RENDER); a.resolve_keys(AGENTS)
-    b = Settings(_env_file=None, **RENDER); b.resolve_keys(AGENTS)
-    assert a.agent_key_map == b.agent_key_map and a.wallet_key_map == b.wallet_key_map  # same after a redeploy
-    assert len(set(a.agent_key_map.values())) == 2 and len(set(a.wallet_key_map.values())) == 2
-    other = Settings(_env_file=None, **{**RENDER, "app_secret": "different"}); other.resolve_keys(AGENTS)
-    assert other.agent_key_map != a.agent_key_map
-    rail = PayKitRail(network="localnet", rpc_url="https://x", wallet_keys=a.wallet_key_map)
+    a, b = Settings(_env_file=None, **RENDER), Settings(_env_file=None, **RENDER)
+    for agent in AGENTS:                                                 # same after a redeploy
+        assert a.agent_key_for(agent) == b.agent_key_for(agent) and a.wallet_key_for(agent) == b.wallet_key_for(agent)
+    assert a.agent_key_for("research-agent") != a.agent_key_for("intern-agent")
+    assert a.agent_key_for("new-agent-added-later").startswith("ab_")  # agents added on the dashboard get keys
+    other = Settings(_env_file=None, **{**RENDER, "app_secret": "different"})
+    assert other.agent_key_for("research-agent") != a.agent_key_for("research-agent")
+    rail = PayKitRail(network="localnet", rpc_url="https://x", wallet_key_for=a.wallet_key_for)
     assert len(rail.pubkey("research-agent")) >= 32
 
 
 def test_explicit_keys_win_over_derived():
-    s = Settings(_env_file=None, **{**RENDER, "agent_keys": "research-agent:mine"}); s.resolve_keys(AGENTS)
-    assert s.agent_key_map["research-agent"] == "mine" and s.agent_key_map["intern-agent"].startswith("ab_")
+    s = Settings(_env_file=None, **{**RENDER, "agent_keys": "research-agent:mine"})
+    assert s.agent_key_for("research-agent") == "mine" and s.agent_key_for("intern-agent").startswith("ab_")
 
 
 def test_mainnet_is_not_a_valid_setting():

@@ -13,7 +13,7 @@ import logging
 from functools import cached_property
 from typing import Literal
 
-from pydantic import PrivateAttr, SecretStr
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger("agentbudget.settings")
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # Access
     app_secret: SecretStr | None = None       # one random string; agent keys and test wallets derive from it
-    operator_token: SecretStr | None = None   # dashboard actions: approve, freeze, export, demo
+    operator_token: SecretStr | None = None   # dashboard actions: approve, freeze, export, rules, demo
     public_demo: bool = False                 # open the dashboard actions to anyone (for judging)
     agent_keys: SecretStr | None = None       # optional override: "research-agent:<key>,intern-agent:<key>"
 
@@ -53,15 +53,12 @@ class Settings(BaseSettings):
     wallets_dir: str = ".wallets"               # optional: key files, used if nothing else is set
     sandbox_autofund: bool = True               # top up agent wallets on the localnet sandbox
 
-    # Catalog and sellers
-    catalog_path: str | None = None
+    # Rules and sellers
+    catalog_path: str | None = None             # starting rules; the live rules are in the database
     vendor_base: str = "http://127.0.0.1:8001"
     explorer_tx_url: str | None = None          # e.g. "https://explorer.solana.com/tx/{tx}?cluster=devnet"
 
     demo_enabled: bool = True
-
-    _agent_keys: dict[str, str] | None = PrivateAttr(default=None)
-    _wallet_keys: dict[str, str] | None = PrivateAttr(default=None)
 
     @cached_property
     def origins(self) -> list[str]:
@@ -71,51 +68,46 @@ class Settings(BaseSettings):
     def is_postgres(self) -> bool:
         return self.database_url.startswith("postgresql")
 
-    # ---- keys: explicit values win, APP_SECRET fills the gaps ---------------------------------------
+    # ---- keys: explicit values win, APP_SECRET covers every other agent (including ones added later) ----
+    @cached_property
+    def explicit_agent_keys(self) -> dict[str, str]:
+        return parse_pairs(self.agent_keys.get_secret_value() if self.agent_keys else None)
+
+    @cached_property
+    def explicit_wallet_keys(self) -> dict[str, str]:
+        return parse_pairs(self.agent_wallet_keys.get_secret_value() if self.agent_wallet_keys else None)
+
     def _derive(self, purpose: str, agent_id: str) -> bytes:
         secret = self.app_secret.get_secret_value().encode()
         return hmac.new(secret, f"agentbudget:{purpose}:{agent_id}".encode(), hashlib.sha256).digest()
 
-    def derived_agent_key(self, agent_id: str) -> str:
-        return "ab_" + base64.urlsafe_b64encode(self._derive("agent-key", agent_id)).decode().rstrip("=")[:32]
-
-    def derived_wallet_key(self, agent_id: str) -> str:
-        from solders.keypair import Keypair  # comes with solana-pay-kit
-
-        return str(Keypair.from_seed(self._derive("wallet", agent_id)))  # base58 secret key
-
-    def resolve_keys(self, agent_ids) -> None:
-        agent_keys = parse_pairs(self.agent_keys.get_secret_value() if self.agent_keys else None)
-        wallet_keys = parse_pairs(self.agent_wallet_keys.get_secret_value() if self.agent_wallet_keys else None)
+    def agent_key_for(self, agent_id: str) -> str | None:
+        if agent_id in self.explicit_agent_keys:
+            return self.explicit_agent_keys[agent_id]
         if self.app_secret:
-            for agent_id in agent_ids:
-                agent_keys.setdefault(agent_id, self.derived_agent_key(agent_id))
-                wallet_keys.setdefault(agent_id, self.derived_wallet_key(agent_id))
-        self._agent_keys, self._wallet_keys = agent_keys, wallet_keys
+            return "ab_" + base64.urlsafe_b64encode(self._derive("agent-key", agent_id)).decode().rstrip("=")[:32]
+        return None
 
-    @property
-    def agent_key_map(self) -> dict[str, str]:
-        if self._agent_keys is None:
-            return parse_pairs(self.agent_keys.get_secret_value() if self.agent_keys else None)
-        return self._agent_keys
+    def wallet_key_for(self, agent_id: str) -> str | None:
+        if agent_id in self.explicit_wallet_keys:
+            return self.explicit_wallet_keys[agent_id]
+        if self.app_secret:
+            from solders.keypair import Keypair  # comes with solana-pay-kit
 
-    @property
-    def wallet_key_map(self) -> dict[str, str]:
-        if self._wallet_keys is None:
-            return parse_pairs(self.agent_wallet_keys.get_secret_value() if self.agent_wallet_keys else None)
-        return self._wallet_keys
+            return str(Keypair.from_seed(self._derive("wallet", agent_id)))  # base58 secret key
+        return None
 
-    # ---- startup check -----------------------------------------------------------------------------
+    # ---- startup check ----------------------------------------------------------------------------------
     def check(self, agent_ids: list[str] | tuple[str, ...] = ()) -> None:
         """Refuse to start with missing or unsafe settings, listing every problem at once."""
         how = "Set APP_SECRET to any long random string (Render can generate one)."
         problems = []
         if not self.public_demo and not self.operator_token:
             problems.append("Set OPERATOR_TOKEN, or PUBLIC_DEMO=true to open the dashboard for a demo.")
-        if missing := [a for a in agent_ids if a not in self.agent_key_map]:
+        if missing := [a for a in agent_ids if not self.agent_key_for(a)]:
             problems.append(f"No agent key for: {', '.join(missing)}. {how}")
         if self.rail == "paykit":
-            if missing := [a for a in agent_ids if a not in self.wallet_key_map]:
+            if missing := [a for a in agent_ids if not self.wallet_key_for(a)]:
                 problems.append(f"No wallet for: {', '.join(missing)} (needed when RAIL=paykit). {how}")
             if any(host in self.vendor_base for host in ("127.0.0.1", "localhost")):
                 problems.append("VENDOR_BASE still points to this machine. Set it to the sellers' public URL, "
