@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: agentbudget-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: RAIL
+        value: paykit
+      - key: NETWORK
+        value: localnet
+      - key: RPC_URL
+        value: https://402.surfnet.dev:8899
+      - key: PUBLIC_DEMO
+        value: "true"
+      - key: VENDOR_BASE            # the vendors service's public URL, e.g. https://agentbudget-vendors.onrender.com
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ALLOWED_ORIGIN_REGEX
+        sync: false
+      - key: APP_SECRET             # agent keys and test wallets are derived from it
+        generateValue: true
+      - key: OPERATOR_TOKEN         # read it in Render -> Environment when you need it
+        generateValue: true
+
+  - type: web
+    name: agentbudget-vendors
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn vendors.app:app --host 0.0.0.0 --port $PORT --proxy-headers
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: PAYWALL
+        value: "on"
+      - key: VENDOR_NETWORK
+        value: solana_localnet
