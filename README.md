@@ -9,7 +9,9 @@ AgentBudget is a spending account for AI agents:
 - One switch stops everything.
 - Every payment is made in USDC on Solana and has a receipt anyone can check.
 
-Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This repo is the **backend** (FastAPI on Render, Supabase Postgres). The web app is built in Lovable from [`docs/LOVABLE_PROMPT.md`](docs/LOVABLE_PROMPT.md).
+### ▶ Try it live: **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)**
+
+Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This repo is the **backend** (FastAPI on Render, Supabase Postgres).
 
 ![AgentBudget: how a purchase flows](docs/architecture.svg)
 
@@ -17,7 +19,7 @@ Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This rep
 
 ## For judges: 3 minutes
 
-1. Open the live app: **`<LOVABLE_URL>`** (the first load can take about 30 seconds while the server wakes up).
+1. Open the live app: **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)** (the first load can take about 30 seconds while the server wakes up).
 2. Press **Take the 3-minute tour**. You're the person in charge. Press **Run step** to move on.
    - At step 3 you approve a purchase.
    - At step 7 you flip the kill switch.
@@ -83,7 +85,7 @@ vendors/app.py    demo sellers: paid APIs behind a Solana paywall (its own servi
 scripts/          generate_secrets.py (optional key overrides), fund_sandbox.py
 examples/         claude_agent.py
 supabase/         schema.sql (optional; the API creates its tables itself)
-docs/             product brief, pitch, plan, Lovable prompt, diagrams
+docs/             product brief, pitch, plan, diagrams
 tests/            rules, API, tour, playground, early access; run on SQLite and Postgres
 render.yaml       Render Blueprint for both services
 ```
@@ -104,16 +106,15 @@ The API creates its tables on first start. Nothing else to set up.
 2. Open **agentbudget-api → Environment** and set:
    - `DATABASE_URL`
    - `VENDOR_BASE`: the vendors service's URL
-   - `ALLOWED_ORIGINS`: the Lovable app's URL
+   - `ALLOWED_ORIGINS`: the frontend's URL, `https://solana-hal-payments.lovable.app`
    - `ALLOWED_ORIGIN_REGEX`: value in [`.env.example`](.env.example)
 3. Redeploy. Then check `https://<api>/health` and `https://<api>/docs`.
 
 If something is missing, the API doesn't start, and its log lists every missing setting with the fix.
 
-**3. Lovable (web app)**
-1. Paste [`docs/LOVABLE_PROMPT.md`](docs/LOVABLE_PROMPT.md) into a new project.
-2. Set the API URL, the GitHub URL and the diagram path in `src/config.ts`.
-3. Publish, then put the app's URL in `ALLOWED_ORIGINS` on Render.
+**3. Frontend**
+
+The web app is live at **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)** and talks only to this API.
 
 **Branch testing notes**
 - Switching a branch keeps the environment variables. Both branches use the same database, so don't run two branches at the same time against it.
