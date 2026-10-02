@@ -242,16 +242,14 @@ def _cli() -> None:
     parser.add_argument("--base-url", default=os.getenv("API_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--auto-approve", action="store_true")
     args = parser.parse_args()
-    from .catalog import load_catalog
-
     settings = Settings()
-    settings.resolve_keys(tuple(load_catalog(settings.catalog_path, settings.vendor_base).agents))
+    keys = {a: settings.agent_key_for(a) for a in (AGENT, INTERN)}
     op_token = settings.operator_token.get_secret_value() if settings.operator_token else None
 
     async def main() -> None:
         status = DemoStatus(running=True, mode="auto")
         async with httpx.AsyncClient(base_url=args.base_url, timeout=90) as http:
-            await run_scenario(http, settings.agent_key_map, Controls(status),
+            await run_scenario(http, keys, Controls(status),
                                operator_headers={"Authorization": f"Bearer {op_token}"} if op_token else {},
                                auto_approve=args.auto_approve)
         print(f"Task {status.task_id}")

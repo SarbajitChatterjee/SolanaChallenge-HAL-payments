@@ -123,12 +123,14 @@ class PayKitRail:
     name = "paykit"
 
     def __init__(self, *, network: str, rpc_url: str, wallet_keys: dict[str, str] | None = None,
+                 wallet_key_for: Callable[[str], str | None] | None = None,
                  wallets_dir: str | Path = ".wallets") -> None:
         from solana_pay_kit._paycore.rpc import SolanaRpc  # imported lazily: mock mode needs no SDK
 
         self.network = network          # "localnet" (Surfpool sandbox) or "devnet"
         self.rpc_url = rpc_url
         self.wallet_keys = wallet_keys or {}
+        self.wallet_key_for = wallet_key_for
         self.wallets_dir = Path(wallets_dir)
         self._rpc = SolanaRpc(rpc_url)
         self._balances: dict[str, tuple[float, Decimal | None]] = {}
@@ -137,8 +139,9 @@ class PayKitRail:
         """Keys come from AGENT_WALLET_KEYS (a Render secret); .wallets/<agent>.json is the local fallback."""
         from solana_pay_kit import Signer
 
-        if agent_id in self.wallet_keys:
-            return Signer.base58(self.wallet_keys[agent_id])
+        key = self.wallet_keys.get(agent_id) or (self.wallet_key_for(agent_id) if self.wallet_key_for else None)
+        if key:
+            return Signer.base58(key)
         path = self.wallets_dir / f"{agent_id}.json"
         if path.exists():
             return Signer.file(str(path))

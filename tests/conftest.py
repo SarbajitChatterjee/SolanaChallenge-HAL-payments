@@ -39,7 +39,7 @@ def make_client(request, tmp_path):
         else:
             url = f"sqlite:///{tmp_path / 'test.db'}"
         settings = Settings(_env_file=None, database_url=url, agent_keys=AGENT_KEYS, operator_token=OPERATOR,
-                            **overrides)
+                            app_secret="test-secret", **overrides)
         return TestClient(create_app(settings, rail=MockRail(fake_vendor)))
     return factory
 
