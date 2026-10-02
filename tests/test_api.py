@@ -36,6 +36,7 @@ def test_public_demo_opens_dashboard_but_not_agent_spending(make_client):
 def test_health_is_public(api):
     body = api.get("/health").json()
     assert body["ok"] and body["auth_required"] is True and body["rail"] == "mock"
+    assert api.get("/v1/status").json() == body          # same answer under an address ad blockers ignore
 
 
 def test_cors_allows_only_configured_origin(make_client):
