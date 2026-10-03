@@ -78,6 +78,15 @@ class EventView(BaseModel):
     explorer_url: str | None
 
 
+class SellerView(BaseModel):
+    seller_origin: str               # scheme://host, the seller key
+    vendors: list[str]               # display names of the items from this origin
+    status: Literal["active", "under_review"]
+    incidents: int
+    updated_at: str | None
+    updated_by: str | None           # "HAL" for an automatic review, else the operator
+
+
 class StateView(BaseModel):
     rail: Literal["mock", "paykit"]
     network: str | None

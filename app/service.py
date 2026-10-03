@@ -20,10 +20,10 @@ from urllib.parse import quote
 
 from .catalog import Catalog
 from .rules import Rules
-from .db import Repository, iso, money, start_of_day, utcnow
+from .db import Repository, iso, money, new_id, start_of_day, utcnow
 from .fingerprint import canonical_json, fingerprint
 from .firewall import scan
-from .policy import CatalogItem, Decision, Reason, SpendRequest, evaluate, usd
+from .policy import CatalogItem, Decision, Reason, SpendRequest, _normalize, evaluate, origin, resolve, usd
 from .rails import PaymentRail, PriceRejected
 
 log = logging.getLogger("agentbudget.service")
@@ -57,11 +57,12 @@ def answer(status_code: int, decision: str, status: str, code: str, reason: str,
 
 class SpendService:
     def __init__(self, repo: Repository, rail: PaymentRail, rules: Rules,
-                 explorer_tx_url: str | None = None) -> None:
+                 explorer_tx_url: str | None = None, seller_review_after: int = 1) -> None:
         self.repo = repo
         self.rail = rail
         self.rules = rules
         self.explorer_tx_url = explorer_tx_url
+        self.seller_review_after = seller_review_after  # incidents before a seller goes under review
         
         # Per-process lock per agent. The DB row lock covers several instances; this covers SQLite.
         self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
@@ -94,9 +95,14 @@ class SpendService:
         
         # Response firewall: check what the seller sent before the agent sees it.
         approved = {i.url for i in self.catalog.items.values()}
-        data, flags, _links = scan(result.data, approved, item.content_policy)
+        data, flags, links = scan(result.data, approved, item.content_policy)
         if flags:
             await asyncio.to_thread(self.repo.record_content_flags, decided.event_id, flags)
+
+        # Provenance: remember every link, so a later purchase of it can be traced back to this seller.
+        if links:
+            await asyncio.to_thread(self.repo.record_links, event_id=decided.event_id, agent_id=agent_id,
+                                    origin=origin(item.url), links=links)
         return answer(200, "allow", "settled", "paid", message, amount=usd(item.price), vendor=item.vendor,
                       tool=item.tool, item_name=item.name or item.tool, tx=result.tx,
                       explorer_url=self.explorer_url(result.tx), data=data, content_flags=flags)
@@ -135,14 +141,16 @@ class SpendService:
                 start = now - delta
                 return max(start, floor) if floor else start
 
+            spend = SpendRequest(agent_id=agent_id, task_id=req.task_id, tool=req.tool, url=req.url)
+            target = resolve(spend, catalog.items)  # only to look up the seller's review status
             verdict = evaluate(
-                SpendRequest(agent_id=agent_id, task_id=req.task_id, tool=req.tool, url=req.url),
-                policy=policy, catalog=catalog.items,
+                spend, policy=policy, catalog=catalog.items,
                 spent_task=tx.spent(task_id=req.task_id), spent_today=tx.spent(since=start_of_day()),
                 frozen=tx.is_frozen(), approved=approved,
                 repeat_count=tx.count_fingerprint_since(fp, now - timedelta(minutes=policy.repeat_window_minutes)),
                 attempts_last_min=tx.count_attempts_since(since(timedelta(minutes=1))),
-                spent_last_10m=tx.spent(since=since(timedelta(minutes=10))))
+                spent_last_10m=tx.spent(since=since(timedelta(minutes=10))),
+                seller_under_review=bool(target) and tx.seller_under_review(origin(target.url)))
             item = verdict.item
 
             if approved and (item is None or item.tool != tx.get_approval(req.approval_id)["tool"]):
@@ -154,10 +162,17 @@ class SpendService:
                           reason_code=verdict.code.value, fingerprint=fp, params_json=canonical_json(req.params))
 
             if verdict.decision is Decision.DENY:
-                tx.record(decision="deny", status="blocked", **common)
-                if verdict.code is Reason.CIRCUIT_BREAKER:
-                    tx.freeze(verdict.message)  # only a person can switch the agent back on
-                return answer(403, "deny", "blocked", verdict.code.value, verdict.message)
+
+                # Provenance: a blocked link that came from a paid response names the seller that sent it.
+                source = None
+                if verdict.code is Reason.NOT_IN_CATALOG and req.url:
+                    source = tx.lookup_link(_normalize(req.url), now - timedelta(hours=24))
+                if source is None:
+                    tx.record(decision="deny", status="blocked", **common)
+                    if verdict.code is Reason.CIRCUIT_BREAKER:
+                        tx.freeze(verdict.message)  # only a person can switch the agent back on
+                    return answer(403, "deny", "blocked", verdict.code.value, verdict.message)
+                return self._trace_to_seller(tx, source, verdict.message, common)
 
             if verdict.decision is Decision.HOLD:
                 approval_id = tx.create_approval(task_id=req.task_id, tool=item.tool, vendor=item.vendor,
@@ -171,6 +186,40 @@ class SpendService:
                               "This approval was already used for an earlier purchase.")
             event_id = tx.record(decision="allow", status="reserved", **common)
             return _Reserved(event_id, item)
+
+    def _trace_to_seller(self, tx, source: dict, message: str, common: dict) -> Outcome:
+        """Record the blocked attempt with its cause, add a seller incident, and start a review if needed."""
+        seller, vendor = source["seller_origin"], source["vendor"] or source["seller_origin"]
+        at = source["created_at"].strftime("%H:%M")
+        message += f" The link came from {vendor}, purchase {source['source_event_id'][:4]} at {at} UTC."
+        already = tx.seller_under_review(seller)
+        event_id = new_id()
+        tx.add_incident(seller, "injection", event_id)
+        if already:
+            message += f" {vendor} is under review."
+        elif tx.count_incidents(seller) >= self.seller_review_after:
+            tx.set_seller_status(seller, "under_review", "HAL")
+            message += f" {vendor} is now under review: its next purchases wait for a person."
+        common = {**common, "reason": message}
+        tx.record(decision="deny", status="blocked", event_id=event_id,
+                  caused_by_event_id=source["source_event_id"], **common)
+        return answer(403, "deny", "blocked", Reason.NOT_IN_CATALOG.value, message,
+                      caused_by=source["source_event_id"], caused_by_seller=vendor)
+
+    def sellers(self) -> list[dict[str, Any]]:
+        """Every seller in the rules or with a record, with its status and incident count."""
+        overview = self.repo.seller_overview()
+        names: dict[str, list[str]] = defaultdict(list)
+        for i in self.catalog.items.values():
+            if i.vendor not in names[origin(i.url)]:
+                names[origin(i.url)].append(i.vendor)
+        out = []
+        for seller in sorted(set(names) | set(overview)):
+            row = overview.get(seller, {})
+            out.append({"seller_origin": seller, "vendors": names.get(seller, []),
+                        "status": row.get("status", "active"), "incidents": row.get("incidents", 0),
+                        "updated_at": iso(row.get("updated_at")), "updated_by": row.get("updated_by")})
+        return out
 
     # ---- read models -----------------------------------------------------------
     def explorer_url(self, tx: str | None) -> str | None:

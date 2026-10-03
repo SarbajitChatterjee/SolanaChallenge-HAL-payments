@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..db import iso
 from ..ratelimit import limit
-from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, StateView
+from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, SellerView, StateView
 from ..security import actor_of, require_operator, require_operator_token
 from ..service import CallRequest
 
@@ -65,6 +65,27 @@ async def unfreeze(agent_id: str, request: Request):
     _known_agent(request, agent_id)
     await asyncio.to_thread(request.app.state.repo.set_frozen, agent_id, False)
     return {"agent_id": agent_id, "frozen": False}
+
+
+# ---- Handling sellers under review (provenance) ------------------------------------------------
+@router.get("/sellers", response_model=list[SellerView])
+async def sellers(request: Request):
+    return await asyncio.to_thread(request.app.state.service.sellers)
+
+
+@router.post("/sellers/{origin:path}/restore", response_model=SellerView)
+async def restore_seller(origin: str, request: Request):
+    """End a review: purchases from this seller are paid automatically again."""
+    service = request.app.state.service
+    origin = origin.rstrip("/").lower()
+    known = {s["seller_origin"]: s for s in await asyncio.to_thread(service.sellers)}
+    if origin not in known:
+        raise HTTPException(404, f"Unknown seller '{origin}'.")
+    actor = actor_of(request)
+    await asyncio.to_thread(request.app.state.repo.restore_seller, origin, actor)
+    await asyncio.to_thread(request.app.state.repo.add_audit, actor=actor, action="seller.restored", target=origin,
+                            details={"previous_status": known[origin]["status"]})
+    return next(s for s in await asyncio.to_thread(service.sellers) if s["seller_origin"] == origin)
 
 
 @router.get("/ledger.csv", response_class=PlainTextResponse)

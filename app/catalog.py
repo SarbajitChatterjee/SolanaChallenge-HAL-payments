@@ -24,10 +24,18 @@ def read_seed(path: str | None = None) -> dict:
     return {"agents": raw["agents"], "items": raw["catalog"]}
 
 
-def to_catalog(agent_rows: list[dict], item_rows: list[dict], vendor_base: str) -> Catalog:
-    base = vendor_base.rstrip("/")
+def fill(url: str, bases: dict[str, str] | str) -> str:
+    """Replace {vendor_base} / {news_base} in an item URL with VENDOR_BASE / NEWS_VENDOR_BASE."""
+    if isinstance(bases, str):
+        bases = {"vendor_base": bases, "news_base": bases}
+    for key, base in bases.items():
+        url = url.replace("{" + key + "}", base.rstrip("/"))
+    return url
+
+
+def to_catalog(agent_rows: list[dict], item_rows: list[dict], bases: dict[str, str] | str) -> Catalog:
     items = {
-        r["tool"]: CatalogItem(tool=r["tool"], url=r["url"].replace("{vendor_base}", base),
+        r["tool"]: CatalogItem(tool=r["tool"], url=fill(r["url"], bases),
                                price=Decimal(str(r["price"])), vendor=r["vendor"], name=r.get("name") or "",
                                description=r.get("description") or "",
                                content_policy=r.get("content_policy") or "annotate")
@@ -47,7 +55,7 @@ def to_catalog(agent_rows: list[dict], item_rows: list[dict], vendor_base: str) 
     return Catalog(items, agents)
 
 
-def load_catalog(path: str | None, vendor_base: str) -> Catalog:
+def load_catalog(path: str | None, vendor_base: dict[str, str] | str) -> Catalog:
     """The starting rules as a Catalog (used by scripts and tests)."""
     seed = read_seed(path)
     return to_catalog(seed["agents"], seed["items"], vendor_base)
