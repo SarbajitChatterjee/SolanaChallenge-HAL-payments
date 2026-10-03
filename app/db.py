@@ -13,16 +13,20 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterator
 
-from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Index, MetaData, String, Table, Text,
-                        create_engine, delete, func, insert, select, text, update)
+from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Float, Index, Integer, MetaData, String, Table, Text,
+                        create_engine, delete, func, insert, inspect, select, text, update)
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import CreateColumn
+
+log = logging.getLogger("agentbudget.db")
 
 PG_SCHEMA = "agentbudget"
 MICRO = Decimal(10**6)
@@ -90,6 +94,11 @@ agents = Table(
     Column("active", Boolean, nullable=False, default=True),  # archived agents keep their history
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Loop protection (feat/1.2). server_default fills existing rows when the column is added.
+    Column("max_repeats", Integer, nullable=False, server_default=text("2")),
+    Column("repeat_window_minutes", Integer, nullable=False, server_default=text("60")),
+    Column("max_attempts_per_min", Integer, nullable=False, server_default=text("30")),
+    Column("velocity_share_10m", Float, nullable=False, server_default=text("0.2")),
 )
 
 catalog_items = Table(
@@ -103,6 +112,11 @@ catalog_items = Table(
     Column("active", Boolean, nullable=False, default=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Response firewall and reuse (feat/2.1, feat/2.3). 0 seconds = no reuse.
+    Column("reuse_ttl_seconds", Integer, nullable=False, server_default=text("0")),
+    Column("reuse_scope", String(8), nullable=False, server_default=text("'agent'")),      # agent | org
+    Column("content_policy", String(16), nullable=False, server_default=text("'annotate'")),  # annotate | redact | hold
+    Column("expect_json", Text),                                                           # delivery check (feat/2.4)
 )
 
 audit_log = Table(
@@ -114,6 +128,74 @@ audit_log = Table(
     Column("target", String(128)),
     Column("details", Text),                                  # JSON: {"field": [old, new], ...}
 )
+
+# ---- purchase firewall (feat/1.2 to feat/2.5) ----------------------------------------------------
+# A seller is identified by its origin (scheme://host), never by its display name.
+
+event_details = Table(  # one row for each purchase event, written when the purchase finishes
+    "event_details", metadata,
+    Column("event_id", String(24), primary_key=True),
+    Column("agent_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("fingerprint", String(64)),               # SHA-256 of tool + canonical params
+    Column("params_json", Text),
+    Column("quoted_price_micros", BigInteger),       # what the seller asked, also when HAL refused it
+    Column("caused_by_event_id", String(24)),        # the purchase whose content led to this request
+    Column("reused_from_event_id", String(24)),
+    Column("content_flags_json", Text),
+    Column("delivery_status", String(24)),
+    Column("match_status", String(24)),
+)
+Index("ix_event_details_fingerprint", event_details.c.agent_id, event_details.c.fingerprint,
+      event_details.c.created_at)
+
+purchase_payloads = Table(  # stored only for items with reuse, max 256 KB, deleted at expiry
+    "purchase_payloads", metadata,
+    Column("event_id", String(24), primary_key=True),
+    Column("body_json", Text, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+)
+
+content_links = Table(  # every URL found in a paid response
+    "content_links", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("url_normalized", Text, nullable=False),
+    Column("source_event_id", String(24), nullable=False),
+    Column("seller_origin", String(256), nullable=False),
+    Column("agent_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_content_links_url", content_links.c.url_normalized)
+
+seller_status = Table(
+    "seller_status", metadata,
+    Column("seller_origin", String(256), primary_key=True),
+    Column("status", String(16), nullable=False, server_default=text("'active'")),  # active | under_review
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("updated_by", String(32)),
+)
+
+seller_incidents = Table(
+    "seller_incidents", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("seller_origin", String(256), nullable=False),
+    Column("kind", String(16), nullable=False),      # injection | delivery | overquote
+    Column("event_id", String(24)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_seller_incidents_origin", seller_incidents.c.seller_origin)
+
+claims = Table(  # x402 has no chargebacks; a claim is our record of a bad delivery
+    "claims", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("event_id", String(24), nullable=False),
+    Column("seller_origin", String(256), nullable=False),
+    Column("amount_micros", BigInteger, nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'open'")),
+    Column("evidence_json", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -216,7 +298,27 @@ class Repository:
         if self.is_postgres:
             with self.engine.begin() as conn:
                 conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{PG_SCHEMA}"'))
-        metadata.create_all(self.engine)
+        metadata.create_all(self.engine)   # creates missing tables, never changes existing ones
+        if added := self.add_missing_columns():
+            log.info("added columns: %s", ", ".join(added))
+
+    def add_missing_columns(self) -> list[str]:
+        """Add columns that the code defines but an existing table does not have yet (e.g. in Supabase).
+        Additive only: never drops or renames. New NOT NULL columns must have a server_default."""
+        schema = PG_SCHEMA if self.is_postgres else None
+        quote = self.engine.dialect.identifier_preparer.quote
+        existing = inspect(self.engine)
+        added = []
+        with self.engine.begin() as conn:
+            for table in metadata.sorted_tables:
+                have = {c["name"] for c in existing.get_columns(table.name, schema=schema)}
+                target = f"{quote(schema)}.{quote(table.name)}" if schema else quote(table.name)
+                for column in table.columns:
+                    if column.name not in have:
+                        ddl = CreateColumn(column).compile(dialect=self.engine.dialect)
+                        conn.execute(text(f"ALTER TABLE {target} ADD COLUMN {ddl}"))
+                        added.append(f"{table.name}.{column.name}")
+        return added
 
     def seed_agents(self, agent_ids) -> None:
         for agent_id in agent_ids:
