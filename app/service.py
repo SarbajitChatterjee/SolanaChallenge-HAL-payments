@@ -22,6 +22,7 @@ from .catalog import Catalog
 from .rules import Rules
 from .db import Repository, iso, money, start_of_day, utcnow
 from .fingerprint import canonical_json, fingerprint
+from .firewall import scan
 from .policy import CatalogItem, Decision, Reason, SpendRequest, evaluate, usd
 from .rails import PaymentRail, PriceRejected
 
@@ -61,6 +62,7 @@ class SpendService:
         self.rail = rail
         self.rules = rules
         self.explorer_tx_url = explorer_tx_url
+        
         # Per-process lock per agent. The DB row lock covers several instances; this covers SQLite.
         self._locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
@@ -89,9 +91,15 @@ class SpendService:
         message = f"Paid {usd(item.price)} USD to {item.vendor}."
         await asyncio.to_thread(self.repo.finish_event, decided.event_id, status="settled", tx=result.tx,
                                 reason=message, reason_code="paid")
+        
+        # Response firewall: check what the seller sent before the agent sees it.
+        approved = {i.url for i in self.catalog.items.values()}
+        data, flags, _links = scan(result.data, approved, item.content_policy)
+        if flags:
+            await asyncio.to_thread(self.repo.record_content_flags, decided.event_id, flags)
         return answer(200, "allow", "settled", "paid", message, amount=usd(item.price), vendor=item.vendor,
                       tool=item.tool, item_name=item.name or item.tool, tx=result.tx,
-                      explorer_url=self.explorer_url(result.tx), data=result.data)
+                      explorer_url=self.explorer_url(result.tx), data=data, content_flags=flags)
 
     @property
     def catalog(self) -> Catalog:

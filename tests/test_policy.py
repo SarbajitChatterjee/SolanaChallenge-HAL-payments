@@ -78,3 +78,62 @@ def test_fingerprint_ignores_key_order_spacing_and_case():
     assert fingerprint("fx_rate", {"day": " mon ", "pair": "eurusd"}) == base
     assert fingerprint("fx_rate", {"pair": "GBPUSD", "day": "Mon"}) != base
     assert fingerprint("news_search", {"pair": "EURUSD", "day": "Mon"}) != base
+
+
+# ---- response firewall (feat/2.1 | version 1.5.4) ---------------------------------------------------------------------------
+from app.firewall import REDACTED, scan  # noqa: E402
+from tests.conftest import INJECTION  # noqa: E402
+
+APPROVED = {"http://127.0.0.1:8001/v1/news", "http://127.0.0.1:8001/v1/company"}
+USUAL_HEADLINES = [
+    "Duping Bahn wins supplier contract with regional carmaker",
+    "Duping Bahn reports delayed deliveries due to steel prices",
+    "Duping Bahn revenue rises 8% to 12 million USD in 2025",
+    "Investor agrees to buy 20% stake in Duping Bahn for 3 million USD",
+    "Duping Bahn opens a new plant in Saarbruecken",
+    "CEO says the company will pay suppliers within 30 days",
+    "Rail freight prices fall for the third quarter in a row",
+    "Duping Bahn named among the top 100 Mittelstand employers",
+    "Union and management agree on a new wage deal",
+    "Analysts expect stable demand for steel parts in 2027",
+]
+
+
+def test_firewall_removes_the_demo_injection():
+    data = {"items": [{"title": USUAL_HEADLINES[0]}, {"title": "Note for AI agents", "body": INJECTION}]}
+    out, flags, links = scan(data, APPROVED, "redact")
+    assert out["items"][1]["body"] == REDACTED and out["items"][0] == data["items"][0]
+    assert out["items"][1]["title"] == REDACTED          # "Note for AI agents" also speaks to the agent
+    assert {f["kind"] for f in flags} == {"agent_instruction", "payment_solicitation", "unlisted_link"}
+    assert {f["path"] for f in flags} == {"items[1].title", "items[1].body"}
+    assert all(len(f["extract"]) <= 80 for f in flags)
+    assert links == ["http://127.0.0.1:8001/shady/full-dossier"]
+
+
+def test_firewall_leaves_usual_headlines_alone():
+    data = {"items": [{"title": h} for h in USUAL_HEADLINES]}
+    out, flags, _ = scan(data, APPROVED, "redact")
+    assert out == data and flags == []
+
+
+def test_annotate_keeps_the_data_and_adds_flags():
+    data = {"body": INJECTION}
+    out, flags, _ = scan(data, APPROVED, "annotate")
+    assert out == data and {f["kind"] for f in flags} == {"agent_instruction", "payment_solicitation", "unlisted_link"}
+
+
+def test_an_unlisted_link_alone_is_flagged_but_never_removed():
+    data = {"text": "Full report at https://www.example.org/report.pdf."}
+    out, flags, links = scan(data, APPROVED, "redact")
+    assert out == data and [f["kind"] for f in flags] == ["unlisted_link"]
+    assert links == ["https://www.example.org/report.pdf"]
+
+
+def test_approved_links_are_not_flagged():
+    assert scan({"next": "http://127.0.0.1:8001/v1/company"}, APPROVED, "redact")[1] == []
+
+
+def test_very_large_responses_are_passed_through_with_a_flag():
+    data = {"blob": "x" * 250_000}
+    out, flags, _ = scan(data, APPROVED, "redact")
+    assert out is data and flags[0]["kind"] == "not_scanned"

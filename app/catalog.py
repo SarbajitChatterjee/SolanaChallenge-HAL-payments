@@ -29,7 +29,8 @@ def to_catalog(agent_rows: list[dict], item_rows: list[dict], vendor_base: str) 
     items = {
         r["tool"]: CatalogItem(tool=r["tool"], url=r["url"].replace("{vendor_base}", base),
                                price=Decimal(str(r["price"])), vendor=r["vendor"], name=r.get("name") or "",
-                               description=r.get("description") or "")
+                               description=r.get("description") or "",
+                               content_policy=r.get("content_policy") or "annotate")
         for r in item_rows if r.get("active", True)
     }
     agents = {

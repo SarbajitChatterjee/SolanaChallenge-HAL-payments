@@ -49,6 +49,7 @@ class CatalogItem:
     vendor: str
     name: str = ""          # human name, e.g. "Company record"
     description: str = ""
+    content_policy: str = "annotate"   # response firewall: annotate | redact
 
 
 @dataclass(frozen=True)
