@@ -66,7 +66,7 @@ def test_tour_is_driven_by_the_visitor(api):
     assert demo["finished"] and demo["error"] is None
     events = api.get("/v1/state", headers=OP_H).json()["events"]
     codes = [e["reason_code"] for e in events]
-    for code in ("paid", "not_in_catalog", "price_too_high", "task_budget", "not_allowed", "frozen"):
+    for code in ("paid", "not_in_catalog", "price_too_high", "repeat_purchase", "not_allowed", "frozen"):
         assert code in codes, code
 
 
@@ -84,7 +84,7 @@ def test_auto_mode_runs_through(api):
     demo = wait_until(api, lambda d: not d["running"], timeout=30)
     assert demo["finished"], demo
     st = statuses(api)
-    assert st.count("settled") == 6 and st.count("blocked") == 5
+    assert st.count("settled") == 5 and st.count("blocked") == 6   # loop: 1 paid, then 2 repeats
     assert not next(a for a in api.get("/v1/state", headers=OP_H).json()["agents"]
                     if a["agent_id"] == "research-agent")["frozen"]
 

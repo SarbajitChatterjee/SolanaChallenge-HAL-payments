@@ -95,13 +95,15 @@ def test_price_pinning_releases_budget(api):
 
 
 def test_runaway_loop_stops_at_task_cap(api):
-    codes = [call(api, tool="news_search").status_code for _ in range(18)]
+    # different params each time, so this tests the task budget and not the repeat rule
+    codes = [call(api, tool="news_search", params={"q": f"query {i}"}).status_code for i in range(18)]
     assert codes.count(200) == 15 and codes[15:] == [403, 403, 403]
 
 
 def test_parallel_calls_never_overspend(api):
     with ThreadPoolExecutor(max_workers=8) as pool:
-        codes = list(pool.map(lambda _: call(api, task="race", tool="news_search").status_code, range(24)))
+        codes = list(pool.map(lambda i: call(api, task="race", tool="news_search",
+                                             params={"q": f"query {i}"}).status_code, range(24)))
     assert codes.count(200) == 15  # 0.75 cap / 0.05
     assert research(api)["current_task"]["spent"] == "0.75"
 
@@ -149,3 +151,40 @@ def test_waiting_row_turns_into_the_decision(api):
     assert row(no)["status"] == "denied" and "said no" in row(no)["reason"]
     assert api.post(f"/v1/approvals/{no}/approve", headers=OP_H).status_code == 409   # can't change a decision
     assert row(no)["status"] == "denied"
+
+# ---- loop protection: repeat rule and circuit breaker (feat/1.2) ------------------------------------------
+def test_new_task_ids_do_not_get_around_the_limits(api):
+    """The review's probe: a loop with a new task id for every call. Before this fix, 500 of 600 calls were paid."""
+    results = [call(api, task=f"loop-{i}", tool="news_search", params={"q": "Duping Bahn"}) for i in range(600)]
+    codes = [r.json().get("reason_code") for r in results]
+    assert codes.count("paid") == 2
+    assert codes[2] == "repeat_purchase"                      # the third purchase is refused as a repeat
+    assert "circuit_breaker" in codes and research(api)["frozen"] is True
+
+
+def test_same_purchase_is_paid_at_most_twice(api):
+    first, second, third = (call(api, task=f"t{i}", tool="fx_rate", params={"pair": "EURUSD"}) for i in range(3))
+    assert first.status_code == second.status_code == 200
+    assert third.status_code == 403 and third.json()["reason_code"] == "repeat_purchase"
+    other = call(api, task="t4", tool="fx_rate", params={"pair": " eurusd "})       # same after normalising
+    assert other.json()["reason_code"] == "repeat_purchase"
+    assert call(api, task="t5", tool="fx_rate", params={"pair": "GBPUSD"}).status_code == 200  # different purchase
+
+
+def test_breaker_freezes_after_31_attempts_and_only_an_operator_unfreezes(api):
+    codes = [call(api, tool="fx_rate", params={"pair": f"P{i}"}).json()["reason_code"] for i in range(31)]
+    assert codes[:30] == ["paid"] * 30 and codes[30] == "circuit_breaker"
+    assert research(api)["frozen"] is True
+    stop = next(e for e in api.get("/v1/state", headers=OP_H).json()["events"] if e["status"] == "control")
+    assert stop["reason_code"] == "circuit_breaker" and stop["reason"].startswith("Stopped automatically")
+    assert call(api, tool="fx_rate", params={"pair": "X"}).json()["reason_code"] == "frozen"
+    assert api.post("/v1/agents/research-agent/unfreeze", headers=AGENT_H).status_code == 401  # the agent can't
+    assert api.post("/v1/agents/research-agent/unfreeze", headers=OP_H).status_code == 200    # a person can
+    assert call(api, tool="fx_rate", params={"pair": "Y"}).status_code == 200                 # counting restarts
+
+
+def test_waiting_for_an_approval_does_not_trip_the_breaker(api):
+    approval_id = call(api, tool="credit_report").json()["approval_id"]
+    for _ in range(40):                                        # an agent polling while it waits
+        assert call(api, tool="credit_report", approval_id=approval_id).status_code == 202
+    assert research(api)["frozen"] is False

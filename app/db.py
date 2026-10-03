@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Iterator
 
@@ -250,13 +250,44 @@ class AgentTx:
 
     def record(self, *, task_id: str, decision: str, status: str, reason: str, reason_code: str,
                tool: str | None = None, url: str | None = None, vendor: str | None = None,
-               amount: Decimal | None = None, event_id: str | None = None) -> str:
+               amount: Decimal | None = None, event_id: str | None = None, fingerprint: str | None = None,
+               params_json: str | None = None) -> str:
         event_id = event_id or new_id()
+        now = utcnow()
         self.conn.execute(insert(events).values(
-            id=event_id, created_at=utcnow(), agent_id=self.agent_id, task_id=task_id, tool=tool, url=url,
+            id=event_id, created_at=now, agent_id=self.agent_id, task_id=task_id, tool=tool, url=url,
             vendor=vendor, amount_micros=to_micros(amount), decision=decision, status=status, reason=reason,
             reason_code=reason_code))
+        if fingerprint is not None:
+            self.conn.execute(insert(event_details).values(event_id=event_id, agent_id=self.agent_id, created_at=now,
+                                                           fingerprint=fingerprint, params_json=params_json))
         return event_id
+
+    # ---- loop protection (repeat rule and circuit breaker) ----
+    def unfrozen_at(self) -> datetime | None:
+        """When a person last switched this agent back on. Attempts before that don't count again."""
+        at = self.conn.execute(select(func.max(events.c.created_at)).where(
+            events.c.agent_id == self.agent_id, events.c.status == "control",
+            events.c.reason_code == "kill_switch_off")).scalar()
+        return at if at is None or at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+    def count_attempts_since(self, since: datetime) -> int:
+        """Every purchase attempt, also blocked ones. Polls with an approval_id never create a row."""
+        return int(self.conn.execute(select(func.count()).select_from(events).where(
+            events.c.agent_id == self.agent_id, events.c.status != "control",
+            events.c.created_at >= since)).scalar_one())
+
+    def count_fingerprint_since(self, fingerprint: str, since: datetime) -> int:
+        """Paid (or currently paying) purchases with this fingerprint."""
+        return int(self.conn.execute(
+            select(func.count()).select_from(event_details.join(events, events.c.id == event_details.c.event_id))
+            .where(event_details.c.agent_id == self.agent_id, event_details.c.fingerprint == fingerprint,
+                   event_details.c.created_at >= since, events.c.status.in_(COUNTED))).scalar_one())
+
+    def freeze(self, reason: str) -> None:
+        """The circuit breaker trips: same effect as the kill switch, in the same transaction."""
+        self.conn.execute(update(agent_state).where(agent_state.c.agent_id == self.agent_id).values(frozen=True))
+        self.record(task_id="-", decision="deny", status="control", reason=reason, reason_code="circuit_breaker")
 
     def get_approval(self, approval_id: str) -> dict | None:
         row = self.conn.execute(select(approvals).where(approvals.c.id == approval_id)).mappings().first()
@@ -389,6 +420,8 @@ class Repository:
                 "allowed_tools": json.loads(r["allowed_tools"]),
                 "per_task_cap": from_micros(r["per_task_cap_micros"]), "daily_cap": from_micros(r["daily_cap_micros"]),
                 "approval_above": from_micros(r["approval_above_micros"]), "active": bool(r["active"]),
+                "max_repeats": r["max_repeats"], "repeat_window_minutes": r["repeat_window_minutes"],
+                "max_attempts_per_min": r["max_attempts_per_min"], "velocity_share_10m": r["velocity_share_10m"],
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
     @staticmethod

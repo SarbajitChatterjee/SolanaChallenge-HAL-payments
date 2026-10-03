@@ -36,7 +36,11 @@ def to_catalog(agent_rows: list[dict], item_rows: list[dict], vendor_base: str) 
         r["agent_id"]: AgentPolicy(agent_id=r["agent_id"], allowed_tools=frozenset(r["allowed_tools"]),
                                    per_task_cap=Decimal(str(r["per_task_cap"])), daily_cap=Decimal(str(r["daily_cap"])),
                                    approval_above=Decimal(str(r["approval_above"])),
-                                   description=r.get("description") or "")
+                                   description=r.get("description") or "",
+                                   max_repeats=int(r.get("max_repeats", 2)),
+                                   repeat_window_minutes=int(r.get("repeat_window_minutes", 60)),
+                                   max_attempts_per_min=int(r.get("max_attempts_per_min", 30)),
+                                   velocity_share_10m=float(r.get("velocity_share_10m", 0.2)))
         for r in agent_rows if r.get("active", True)
     }
     return Catalog(items, agents)

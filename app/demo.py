@@ -137,9 +137,9 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
         await controls.wait_for_next()
 
         if step.key == "everyday":
-            await buy(tool="company_lookup", params={"name": "Beispiel Metallbau GmbH"})
+            await buy(tool="company_lookup", params={"name": "Duping Bahn GmbH"})
             await buy(tool="fx_rate", params={"pair": "EURUSD"})
-            news = await buy(tool="news_search", params={"q": "Beispiel Metallbau"})
+            news = await buy(tool="news_search", params={"q": "Duping Bahn"})
 
         elif step.key == "trap":
             items = news.get("data", {}).get("items", []) if isinstance(news.get("data"), dict) else []
@@ -148,14 +148,14 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
             await buy(url=found.group(0) if found else "https://dossier-deals.example/full-dossier")
 
         elif step.key == "approval":
-            await buy(tool="credit_report", params={"name": "Beispiel Metallbau GmbH"})
+            await buy(tool="credit_report", params={"name": "Duping Bahn GmbH"})
 
         elif step.key == "overcharge":
             await buy(tool="fx_realtime", params={"pair": "EURUSD"})
 
         elif step.key == "loop":
             for _ in range(3):
-                await buy(tool="news_search", params={"q": "Beispiel Metallbau"})
+                await buy(tool="news_search", params={"q": "Duping Bahn"})
 
         elif step.key == "permissions":
             await buy(agent=INTERN, tool="credit_report")

@@ -1,10 +1,15 @@
-"""A real LLM agent that has to buy data through AgentBudget to finish its task.
+"""SAMPLE ONLY. Not used by the HAL app, the tour or the demo. Nothing runs it automatically.
 
+It shows how a real AI agent connects to HAL. Claude is only one choice: any program that can send
+an HTTP request with its agent key (any AI model, an agent framework, a plain script) connects the
+same way, through POST /v1/agents/{agent_id}/call.
+
+To try it (needs an Anthropic API key, which is paid per use):
     export ANTHROPIC_API_KEY=... API_BASE_URL=https://<your-api> AGENT_KEY=<research-agent key>
-    python examples/claude_agent.py "Write a short supplier risk memo on Beispiel Metallbau GmbH, amounts in USD and EUR."
+    python examples/claude_agent.py "Write a short supplier risk memo on Duping Bahn GmbH, amounts in USD and EUR."
 
-The agent never sees a key or a wallet. Every tool call is a purchase request to the
-gateway, which answers paid / held for a human / blocked, and the agent adapts.
+The agent never sees a wallet. Every tool call is a purchase request to HAL, which answers
+paid / held for a person / blocked, and the agent adapts.
 """
 
 from __future__ import annotations
@@ -98,5 +103,5 @@ def run(task: str) -> None:
 
 
 if __name__ == "__main__":
-    run(" ".join(sys.argv[1:]) or "Write a short supplier risk memo on Beispiel Metallbau GmbH, "
+    run(" ".join(sys.argv[1:]) or "Write a short supplier risk memo on Duping Bahn GmbH, "
                                    "with key figures in USD and EUR.")

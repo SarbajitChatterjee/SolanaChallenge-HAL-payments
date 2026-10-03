@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -19,8 +20,9 @@ from urllib.parse import quote
 
 from .catalog import Catalog
 from .rules import Rules
-from .db import Repository, iso, money, start_of_day
-from .policy import CatalogItem, Decision, SpendRequest, evaluate, usd
+from .db import Repository, iso, money, start_of_day, utcnow
+from .fingerprint import canonical_json, fingerprint
+from .policy import CatalogItem, Decision, Reason, SpendRequest, evaluate, usd
 from .rails import PaymentRail, PriceRejected
 
 log = logging.getLogger("agentbudget.service")
@@ -117,11 +119,22 @@ class SpendService:
                                   "This approval was already used for an earlier purchase.")
                 approved = True
 
+            # Loop protection: the same purchase across all tasks, and the attempt rate of this agent.
+            fp = fingerprint(req.tool or req.url or "", req.params)
+            now, floor = utcnow(), tx.unfrozen_at()
+
+            def since(delta: timedelta):
+                start = now - delta
+                return max(start, floor) if floor else start
+
             verdict = evaluate(
                 SpendRequest(agent_id=agent_id, task_id=req.task_id, tool=req.tool, url=req.url),
                 policy=policy, catalog=catalog.items,
                 spent_task=tx.spent(task_id=req.task_id), spent_today=tx.spent(since=start_of_day()),
-                frozen=tx.is_frozen(), approved=approved)
+                frozen=tx.is_frozen(), approved=approved,
+                repeat_count=tx.count_fingerprint_since(fp, now - timedelta(minutes=policy.repeat_window_minutes)),
+                attempts_last_min=tx.count_attempts_since(since(timedelta(minutes=1))),
+                spent_last_10m=tx.spent(since=since(timedelta(minutes=10))))
             item = verdict.item
 
             if approved and (item is None or item.tool != tx.get_approval(req.approval_id)["tool"]):
@@ -130,10 +143,12 @@ class SpendService:
             common = dict(task_id=req.task_id, tool=item.tool if item else req.tool,
                           url=item.url if item else req.url, vendor=item.vendor if item else None,
                           amount=item.price if item else None, reason=verdict.message,
-                          reason_code=verdict.code.value)
+                          reason_code=verdict.code.value, fingerprint=fp, params_json=canonical_json(req.params))
 
             if verdict.decision is Decision.DENY:
                 tx.record(decision="deny", status="blocked", **common)
+                if verdict.code is Reason.CIRCUIT_BREAKER:
+                    tx.freeze(verdict.message)  # only a person can switch the agent back on
                 return answer(403, "deny", "blocked", verdict.code.value, verdict.message)
 
             if verdict.decision is Decision.HOLD:
