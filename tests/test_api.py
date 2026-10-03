@@ -188,3 +188,22 @@ def test_waiting_for_an_approval_does_not_trip_the_breaker(api):
     for _ in range(40):                                        # an agent polling while it waits
         assert call(api, tool="credit_report", approval_id=approval_id).status_code == 202
     assert research(api)["frozen"] is False
+
+
+# ---- response firewall (feat/2.1 | version 1.5.4) ---------------------------------------------------------------------------
+def test_news_purchase_comes_back_with_the_injection_removed(api):
+    r = call(api, tool="news_search", params={"q": "Duping Bahn"})
+    body = r.json()
+    assert r.status_code == 200 and body["data"]["items"][1]["body"] == "[removed by HAL: instructions aimed at agents]"
+    assert body["data"]["items"][0]["title"].startswith("Duping Bahn wins")              # normal news untouched
+    assert {f["kind"] for f in body["content_flags"]} >= {"agent_instruction", "unlisted_link"}
+    from app.db import event_details
+    from sqlalchemy import select
+    with api.app.state.repo.engine.connect() as conn:                                      # flags are recorded
+        stored = conn.execute(select(event_details.c.content_flags_json)).scalars().all()
+    assert any(s and "agent_instruction" in s for s in stored)
+
+
+def test_clean_purchases_have_no_flags(api):
+    r = call(api, tool="fx_rate", params={"pair": "EURUSD"})
+    assert r.status_code == 200 and r.json()["content_flags"] == []

@@ -44,6 +44,7 @@ Agents can now pay for data per request: a company record for 5 cents, an exchan
 | Kill switch | Stops one agent's spending, starting with its next purchase. |
 | Repeat purchases | The same purchase (same item, same details) is paid at most twice per hour, across all tasks. A loop that starts a new task every time is still caught. |
 | Circuit breaker | More than 30 attempts in a minute, or more than 20% of the daily budget spent in 10 minutes, freezes the agent automatically. Only a person can switch it back on. |
+| Response firewall | HAL checks the data each seller sends back before the agent sees it. Text that gives instructions to an AI agent, asks for a payment, or links to an unapproved seller is flagged. For items set to `redact` (in the demo: news), instructions and payment requests are removed. |
 | Allowed items per agent | Each agent can only buy what it was allowed to buy. |
 | Receipts | Every paid purchase is in the ledger with its Solana receipt, and exports as a CSV for the accountant. |
 
@@ -72,7 +73,7 @@ r = httpx.post(f"{API}/v1/agents/research-agent/call",
 
 | Answer | Meaning | What your agent does |
 |---|---|---|
-| `200` | Paid | Use `data`. The receipt is in `tx`. |
+| `200` | Paid | Use `data`. The receipt is in `tx`. `content_flags` lists anything HAL found in the data, e.g. instructions aimed at agents. |
 | `202` | Waiting for a person | Repeat the same request with `approval_id` every few seconds. |
 | `403` | Blocked | Don't retry. `reason` says why. |
 

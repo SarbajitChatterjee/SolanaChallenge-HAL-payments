@@ -375,6 +375,11 @@ class Repository:
                          .where(agent_state.c.agent_id == agent_id).with_for_update())
             yield AgentTx(conn, agent_id)
 
+    def record_content_flags(self, event_id: str, flags: list[dict]) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(event_details).where(event_details.c.event_id == event_id)
+                         .values(content_flags_json=json.dumps(flags)))
+
     def finish_event(self, event_id: str, *, status: str, decision: str | None = None,
                      reason: str | None = None, reason_code: str | None = None, tx: str | None = None) -> None:
         values: dict = {"status": status}
@@ -428,6 +433,7 @@ class Repository:
     def _item_row(r) -> dict:
         return {"tool": r["tool"], "name": r["name"], "description": r["description"] or "", "vendor": r["vendor"],
                 "url": r["url"], "price": from_micros(r["price_micros"]), "active": bool(r["active"]),
+                "content_policy": r["content_policy"],
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
     @staticmethod
@@ -443,7 +449,7 @@ class Repository:
     def _item_values(i: dict) -> dict:
         return {"tool": i["tool"], "name": i.get("name") or i["tool"], "description": i.get("description") or "",
                 "vendor": i["vendor"], "url": i["url"], "price_micros": to_micros(Decimal(str(i["price"]))),
-                "active": i.get("active", True)}
+                "active": i.get("active", True), "content_policy": i.get("content_policy") or "annotate"}
 
     def list_agents(self) -> list[dict]:
         with self.engine.connect() as conn:
