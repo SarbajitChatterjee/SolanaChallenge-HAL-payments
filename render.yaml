@@ -20,6 +20,8 @@ services:
         value: "true"
       - key: VENDOR_BASE            # the vendors service's public URL, e.g. https://agentbudget-vendors.onrender.com
         sync: false
+      - key: NEWS_VENDOR_BASE       # the News Wire service's public URL, e.g. https://agentbudget-newswire.onrender.com
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: ALLOWED_ORIGINS
@@ -33,6 +35,25 @@ services:
 
   - type: web
     name: agentbudget-vendors
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn vendors.app:app --host 0.0.0.0 --port $PORT --proxy-headers
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: PAYWALL
+        value: "on"
+      - key: VENDOR_NETWORK
+        value: solana_localnet
+
+  # In demo phase, treating another render service as a new service origin
+  # News Wire runs the same demo seller code on its own service, so it has its own address and counts
+  # as a separate seller. The API uses only its /v1/news.
+  - type: web
+    name: agentbudget-newswire
     runtime: python
     plan: free
     region: frankfurt

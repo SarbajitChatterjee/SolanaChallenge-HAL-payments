@@ -21,7 +21,7 @@ Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This rep
 
 ## For judges: 3 minutes
 
-1. Open the live app: **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)** (the first load can take about 30 seconds while the server wakes up).
+1. Open the live app: **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)** (the first load can take about 30 seconds while the server wakes up). Opening the app also wakes the demo seller services.
 2. Press **Take the 3-minute tour**. You're the person in charge. Press **Run step** to move on.
    - At step 3 you approve a purchase.
    - At step 7 you flip the kill switch.
@@ -45,6 +45,7 @@ Agents can now pay for data per request: a company record for 5 cents, an exchan
 | Repeat purchases | The same purchase (same item, same details) is paid at most twice per hour, across all tasks. A loop that starts a new task every time is still caught. |
 | Circuit breaker | More than 30 attempts in a minute, or more than 20% of the daily budget spent in 10 minutes, freezes the agent automatically. Only a person can switch it back on. |
 | Response firewall | HAL checks the data each seller sends back before the agent sees it. Text that gives instructions to an AI agent, asks for a payment, or links to an unapproved seller is flagged. For items set to `redact` (in the demo: news), instructions and payment requests are removed. |
+| Source of a trap | HAL remembers every link in a paid response. If an agent later tries to buy one of those links and it is blocked, HAL names the seller that sent it and puts that seller under review: its next purchases wait for a person. An operator can end the review. |
 | Allowed items per agent | Each agent can only buy what it was allowed to buy. |
 | Receipts | Every paid purchase is in the ledger with its Solana receipt, and exports as a CSV for the accountant. |
 
@@ -118,10 +119,11 @@ Everything runs on Render. New work goes on a branch: point both services at tha
 The API creates its tables on first start. Nothing else to set up.
 
 **2. Render (API and demo sellers)**
-1. Render → **New → Blueprint**, then pick the repo. It creates `agentbudget-api` and `agentbudget-vendors`, and generates `APP_SECRET` and `OPERATOR_TOKEN` by itself.
+1. Render → **New → Blueprint**, then pick the repo. It creates `agentbudget-api`, `agentbudget-vendors` and `agentbudget-newswire`, and generates `APP_SECRET` and `OPERATOR_TOKEN` by itself.
 2. Open **agentbudget-api → Environment** and set:
    - `DATABASE_URL`
    - `VENDOR_BASE`: the vendors service's URL
+   - `NEWS_VENDOR_BASE`: the News Wire service's URL (News Wire runs on its own service, so it counts as a separate seller)
    - `ALLOWED_ORIGINS`: the frontend's URL, `https://solana-hal-payments.lovable.app`
    - `ALLOWED_ORIGIN_REGEX`: value in [`.env.example`](.env.example)
 3. Redeploy. Then check `https://<api>/health` and `https://<api>/docs`.
@@ -160,6 +162,8 @@ The web app is live at **[https://solana-hal-payments.lovable.app/](https://sola
 | POST | `/v1/rules/agents`, `/v1/rules/items` | operator | Add an agent or an item |
 | PATCH | `/v1/rules/agents/{agent_id}`, `/v1/rules/items/{tool}` | operator | Change rules, or archive with `{"active": false}` |
 | GET | `/v1/rules/history` | operator | Who changed which rule, when, from what to what |
+| GET | `/v1/sellers` | operator | Every seller with its status (`active` or `under_review`) and number of incidents |
+| POST | `/v1/sellers/{origin}/restore` | operator | End a review. Recorded in the change history. |
 | GET | `/v1/early-access`, `/v1/early-access.csv` | operator | Sign-ups |
 | GET | `/v1/agents/{agent_id}/key` | operator token only | An agent's key and wallet address, to connect a real agent |
 | DELETE | `/v1/early-access/{email}` | operator | Delete a sign-up on request |
@@ -196,10 +200,12 @@ The API keeps no state of its own; everything lives in Postgres. Budget decision
 | `NETWORK` | `localnet` | `localnet` (Solana sandbox) or `devnet` |
 | `RPC_URL` | sandbox | Solana RPC |
 | `VENDOR_BASE` | `http://127.0.0.1:8001` | The demo sellers' public URL |
+| `NEWS_VENDOR_BASE` | same as `VENDOR_BASE` | News Wire's public URL. Its own service makes it a separate seller. |
 | `SANDBOX_AUTOFUND` | `true` | Top up agent wallets on the sandbox at startup and before each demo |
 | `CATALOG_PATH` | `app/catalog.json` | The starting rules (the live rules are in the database) |
 | `EXPLORER_TX_URL` | automatic | Receipt link template with `{tx}` |
 | `DEMO_ENABLED` | `true` | The guided tour and demo |
+| `SELLER_REVIEW_AFTER` | `1` | Incidents before a seller goes under review |
 | `AGENT_KEYS`, `AGENT_WALLET_KEYS` | none | Optional overrides per agent (`scripts/generate_secrets.py`) |
 
 ## Honest limitations

@@ -19,7 +19,7 @@
     },
     {
       "tool": "news_search",
-      "url": "{vendor_base}/v1/news",
+      "url": "{news_base}/v1/news",
       "content_policy": "redact",
       "price": "0.05",
       "vendor": "News Wire (demo)",

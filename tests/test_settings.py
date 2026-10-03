@@ -157,3 +157,38 @@ def test_app_upgrades_a_database_from_main(blank_db):
     assert {k: agent[k] for k in NEW_AGENT_COLUMNS} == NEW_AGENT_COLUMNS
     assert {k: item[k] for k in NEW_ITEM_COLUMNS} == NEW_ITEM_COLUMNS
     assert Repository(url).add_missing_columns() == []                   # a second start changes nothing
+
+
+
+# ---- seller addresses and the wake-up (News Wire on its own service) ----------------------------------------------
+def test_news_wire_falls_back_to_the_main_seller_service():
+    from app.catalog import load_catalog
+    alone = Settings(_env_file=None, vendor_base="https://sellers.example")
+    split = Settings(_env_file=None, vendor_base="https://sellers.example", news_vendor_base="https://news.example/")
+    assert load_catalog(None, alone.seller_bases).items["news_search"].url == "https://sellers.example/v1/news"
+    assert load_catalog(None, split.seller_bases).items["news_search"].url == "https://news.example/v1/news"
+    assert load_catalog(None, split.seller_bases).items["fx_rate"].url == "https://sellers.example/v1/fx"
+
+
+def test_news_wire_address_must_be_public_for_real_payments():
+    assert "NEWS_VENDOR_BASE points to this machine" in problems(news_vendor_base="http://localhost:8002")
+    assert problems(news_vendor_base="https://agentbudget-newswire.onrender.com") == ""
+
+
+def test_waker_pings_each_seller_service_at_most_every_5_minutes():
+    import asyncio
+    from app.main import SellerWaker
+    waker = SellerWaker(["https://a.example", "https://b.example/", "http://127.0.0.1:8001", "https://a.example"])
+    assert waker.urls == ["https://a.example/health", "https://b.example/health"]   # no local, no duplicates
+    pinged = []
+
+    async def fake_ping(client, url):
+        pinged.append(url)
+
+    waker.ping = fake_ping
+    asyncio.run(waker.wake())
+    asyncio.run(waker.wake())                                                      # within 5 minutes: skipped
+    assert pinged == ["https://a.example/health", "https://b.example/health"]
+    waker.last -= 301
+    asyncio.run(waker.wake())
+    assert len(pinged) == 4

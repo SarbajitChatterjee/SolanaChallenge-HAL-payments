@@ -94,6 +94,7 @@ agents = Table(
     Column("active", Boolean, nullable=False, default=True),  # archived agents keep their history
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+
     # Loop protection (feat/1.2). server_default fills existing rows when the column is added.
     Column("max_repeats", Integer, nullable=False, server_default=text("2")),
     Column("repeat_window_minutes", Integer, nullable=False, server_default=text("60")),
@@ -107,11 +108,12 @@ catalog_items = Table(
     Column("name", String(80), nullable=False),
     Column("description", Text),
     Column("vendor", String(128), nullable=False),
-    Column("url", Text, nullable=False),                      # may contain {vendor_base}
+    Column("url", Text, nullable=False),                      # may contain {vendor_base} or {news_base}
     Column("price_micros", BigInteger, nullable=False),
     Column("active", Boolean, nullable=False, default=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+
     # Response firewall and reuse (feat/2.1, feat/2.3). 0 seconds = no reuse.
     Column("reuse_ttl_seconds", Integer, nullable=False, server_default=text("0")),
     Column("reuse_scope", String(8), nullable=False, server_default=text("'agent'")),      # agent | org
@@ -251,7 +253,7 @@ class AgentTx:
     def record(self, *, task_id: str, decision: str, status: str, reason: str, reason_code: str,
                tool: str | None = None, url: str | None = None, vendor: str | None = None,
                amount: Decimal | None = None, event_id: str | None = None, fingerprint: str | None = None,
-               params_json: str | None = None) -> str:
+               params_json: str | None = None, caused_by_event_id: str | None = None) -> str:
         event_id = event_id or new_id()
         now = utcnow()
         self.conn.execute(insert(events).values(
@@ -260,7 +262,8 @@ class AgentTx:
             reason_code=reason_code))
         if fingerprint is not None:
             self.conn.execute(insert(event_details).values(event_id=event_id, agent_id=self.agent_id, created_at=now,
-                                                           fingerprint=fingerprint, params_json=params_json))
+                                                           fingerprint=fingerprint, params_json=params_json,
+                                                           caused_by_event_id=caused_by_event_id))
         return event_id
 
     # ---- loop protection (repeat rule and circuit breaker) ----
@@ -283,6 +286,32 @@ class AgentTx:
             select(func.count()).select_from(event_details.join(events, events.c.id == event_details.c.event_id))
             .where(event_details.c.agent_id == self.agent_id, event_details.c.fingerprint == fingerprint,
                    event_details.c.created_at >= since, events.c.status.in_(COUNTED))).scalar_one())
+
+    # ---- provenance: where a link came from, and sellers under review ----
+    def lookup_link(self, url_normalized: str, since: datetime) -> dict | None:
+        """The most recent paid response that contained this link, with the seller that sent it."""
+        row = self.conn.execute(
+            select(content_links.c.source_event_id, content_links.c.seller_origin, content_links.c.created_at,
+                   events.c.vendor)
+            .select_from(content_links.join(events, events.c.id == content_links.c.source_event_id))
+            .where(content_links.c.url_normalized == url_normalized, content_links.c.created_at >= since)
+            .order_by(content_links.c.created_at.desc()).limit(1)).mappings().first()
+        return dict(row) if row else None
+
+    def seller_under_review(self, origin: str) -> bool:
+        return self.conn.execute(select(seller_status.c.status).where(
+            seller_status.c.seller_origin == origin)).scalar() == "under_review"
+
+    def count_incidents(self, origin: str) -> int:
+        return int(self.conn.execute(select(func.count()).select_from(seller_incidents).where(
+            seller_incidents.c.seller_origin == origin)).scalar_one())
+
+    def add_incident(self, origin: str, kind: str, event_id: str) -> None:
+        self.conn.execute(insert(seller_incidents).values(id=new_id(), seller_origin=origin, kind=kind,
+                                                          event_id=event_id, created_at=utcnow()))
+
+    def set_seller_status(self, origin: str, status: str, by: str) -> None:
+        _set_seller_status(self.conn, origin, status, by)
 
     def freeze(self, reason: str) -> None:
         """The circuit breaker trips: same effect as the kill switch, in the same transaction."""
@@ -309,6 +338,12 @@ def _transition(conn: Connection, approval_id: str, from_status: str, to_status:
                        .where(approvals.c.id == approval_id, approvals.c.status == from_status)
                        .values(status=to_status, decided_at=utcnow()))
     return res.rowcount == 1
+
+
+def _set_seller_status(conn: Connection, origin: str, status: str, by: str) -> None:
+    values = {"status": status, "updated_at": utcnow(), "updated_by": by}
+    if conn.execute(update(seller_status).where(seller_status.c.seller_origin == origin).values(**values)).rowcount == 0:
+        conn.execute(insert(seller_status).values(seller_origin=origin, **values))
 
 
 class Repository:
@@ -370,10 +405,35 @@ class Repository:
     @contextmanager
     def agent_tx(self, agent_id: str) -> Iterator[AgentTx]:
         with self.engine.begin() as conn:
+
             # Row lock: serialises decisions for this agent across all API instances (no-op on SQLite).
             conn.execute(select(agent_state.c.agent_id)
                          .where(agent_state.c.agent_id == agent_id).with_for_update())
             yield AgentTx(conn, agent_id)
+
+    def record_links(self, *, event_id: str, agent_id: str, origin: str, links: list[str]) -> None:
+        """Every link in a paid response, so a later purchase of that link can be traced back."""
+        now = utcnow()
+        with self.engine.begin() as conn:
+            for url in links:
+                conn.execute(insert(content_links).values(id=new_id(), url_normalized=url, source_event_id=event_id,
+                                                          seller_origin=origin, agent_id=agent_id, created_at=now))
+
+    def seller_overview(self) -> dict[str, dict]:
+        """Status and incident count for every seller HAL knows about, keyed by origin."""
+        with self.engine.connect() as conn:
+            statuses = {r["seller_origin"]: dict(r) for r in conn.execute(select(seller_status)).mappings()}
+            counts = dict(conn.execute(select(seller_incidents.c.seller_origin, func.count())
+                                       .group_by(seller_incidents.c.seller_origin)).all())
+        return {origin: {"status": statuses.get(origin, {}).get("status", "active"),
+                         "incidents": int(counts.get(origin, 0)),
+                         "updated_at": statuses.get(origin, {}).get("updated_at"),
+                         "updated_by": statuses.get(origin, {}).get("updated_by")}
+                for origin in set(statuses) | set(counts)}
+
+    def restore_seller(self, origin: str, by: str) -> None:
+        with self.engine.begin() as conn:
+            _set_seller_status(conn, origin, "active", by)
 
     def record_content_flags(self, event_id: str, flags: list[dict]) -> None:
         with self.engine.begin() as conn:
@@ -520,7 +580,8 @@ class Repository:
         """Clear purchases and approvals, put the starting rules back, release every kill switch.
         Sign-ups and the change history are kept."""
         with self.engine.begin() as conn:
-            for table in (events, approvals, agents, catalog_items, agent_state):
+            for table in (events, approvals, agents, catalog_items, agent_state, event_details, purchase_payloads,
+                          content_links, seller_status, seller_incidents, claims):
                 conn.execute(delete(table))
             self._insert_seed(conn, seed)
 

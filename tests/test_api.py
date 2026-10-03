@@ -95,6 +95,7 @@ def test_price_pinning_releases_budget(api):
 
 
 def test_runaway_loop_stops_at_task_cap(api):
+
     # different params each time, so this tests the task budget and not the repeat rule
     codes = [call(api, tool="news_search", params={"q": f"query {i}"}).status_code for i in range(18)]
     assert codes.count(200) == 15 and codes[15:] == [403, 403, 403]
@@ -190,7 +191,7 @@ def test_waiting_for_an_approval_does_not_trip_the_breaker(api):
     assert research(api)["frozen"] is False
 
 
-# ---- response firewall (feat/2.1 | version 1.5.4) ---------------------------------------------------------------------------
+# ---- response firewall (feat/2.1) ---------------------------------------------------------------------------
 def test_news_purchase_comes_back_with_the_injection_removed(api):
     r = call(api, tool="news_search", params={"q": "Duping Bahn"})
     body = r.json()
@@ -207,3 +208,81 @@ def test_news_purchase_comes_back_with_the_injection_removed(api):
 def test_clean_purchases_have_no_flags(api):
     r = call(api, tool="fx_rate", params={"pair": "EURUSD"})
     assert r.status_code == 200 and r.json()["content_flags"] == []
+
+
+
+# ---- provenance: find the source of the trap (feat/2.2) ---------------------------------------------------
+DOSSIER = "http://127.0.0.1:8001/shady/full-dossier"
+DEMO_SELLER = "http://127.0.0.1:8001"
+
+
+def test_blocked_link_is_traced_to_the_seller_that_sent_it(api):
+    call(api, tool="news_search", params={"q": "Duping Bahn"})              # the response contains the dossier link
+    news_event = next(e for e in api.get("/v1/state", headers=OP_H).json()["events"] if e["status"] == "settled")
+
+    r = call(api, url=DOSSIER)
+    body = r.json()
+    assert r.status_code == 403 and body["reason_code"] == "not_in_catalog"
+    assert body["caused_by"] == news_event["id"]
+    assert "The link came from News Wire (demo)" in body["reason"] and "is now under review" in body["reason"]
+
+    seller = next(x for x in api.get("/v1/sellers", headers=OP_H).json() if x["seller_origin"] == DEMO_SELLER)
+    assert seller["status"] == "under_review" and seller["incidents"] == 1 and seller["updated_by"] == "HAL"
+
+    held = call(api, tool="news_search", params={"q": "something else"})     # the next purchase waits for a person
+    assert held.status_code == 202 and held.json()["reason_code"] == "seller_under_review"
+    api.post(f"/v1/approvals/{held.json()['approval_id']}/approve", headers=OP_H)
+    paid = call(api, tool="news_search", params={"q": "something else"}, approval_id=held.json()["approval_id"])
+    assert paid.status_code == 200
+
+
+def test_restoring_a_seller_ends_the_review(api):
+    call(api, tool="news_search", params={"q": "Duping Bahn"})
+    call(api, url=DOSSIER)
+    assert api.post(f"/v1/sellers/{DEMO_SELLER}/restore", headers=AGENT_H).status_code == 401
+    r = api.post(f"/v1/sellers/{DEMO_SELLER}/restore", headers=OP_H)
+    assert r.status_code == 200 and r.json()["status"] == "active"
+    assert call(api, tool="fx_rate", params={"pair": "EURUSD"}).status_code == 200
+    history = api.get("/v1/rules/history", headers=OP_H).json()
+    assert history[0]["action"] == "seller.restored" and history[0]["target"] == DEMO_SELLER
+    assert api.post("/v1/sellers/https://nobody.example/restore", headers=OP_H).status_code == 404
+
+
+def test_an_unknown_link_without_a_source_is_only_blocked(api):
+    r = call(api, url="https://dossier-deals.example/full-dossier")         # never seen in a paid response
+    assert r.status_code == 403 and "caused_by" not in r.json()
+    assert all(x["status"] == "active" for x in api.get("/v1/sellers", headers=OP_H).json())
+
+
+def test_reset_demo_ends_reviews(api):
+    call(api, tool="news_search", params={"q": "Duping Bahn"})
+    call(api, url=DOSSIER)
+    api.post("/v1/demo/reset", headers=OP_H)
+    assert all(x["status"] == "active" and x["incidents"] == 0
+               for x in api.get("/v1/sellers", headers=OP_H).json())
+
+
+
+# ---- News Wire as its own seller, and waking the seller services ------------------------------------------------
+NEWS_SELLER = "http://127.0.0.1:8002"
+
+
+def test_news_wire_on_its_own_service_is_a_separate_seller(make_client):
+    with make_client(news_vendor_base=NEWS_SELLER) as api:
+        call(api, tool="news_search", params={"q": "Duping Bahn"})
+        assert "News Wire (demo) is now under review" in call(api, url=DOSSIER).json()["reason"]
+        status = {x["seller_origin"]: x["status"] for x in api.get("/v1/sellers", headers=OP_H).json()}
+        assert status == {DEMO_SELLER: "active", NEWS_SELLER: "under_review"}
+        assert call(api, tool="fx_rate", params={"pair": "EURUSD"}).status_code == 200   # FX Feed still paid
+        assert call(api, tool="news_search", params={"q": "other"}).status_code == 202   # News Wire waits
+
+
+def test_a_status_check_wakes_the_seller_services(api):
+    calls = []
+
+    async def fake_wake():
+        calls.append(1)
+
+    api.app.state.waker.wake = fake_wake
+    assert api.get("/v1/status").status_code == 200 and api.get("/health").status_code == 200
+    assert len(calls) == 2
