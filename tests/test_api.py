@@ -36,6 +36,7 @@ def test_public_demo_opens_dashboard_but_not_agent_spending(make_client):
 def test_health_is_public(api):
     body = api.get("/health").json()
     assert body["ok"] and body["auth_required"] is True and body["rail"] == "mock"
+    assert api.get("/v1/status").json() == body          # same answer under an address ad blockers ignore
 
 
 def test_cors_allows_only_configured_origin(make_client):
@@ -134,3 +135,17 @@ def test_cors_regex_covers_lovable_previews(make_client):
         assert allowed("https://abcd1234.lovableproject.com")
         assert not allowed("https://lovable.app.evil.example")
         assert not allowed("http://agentbudget.lovable.app")  # plain http refused
+
+
+def test_waiting_row_turns_into_the_decision(api):
+    def row(approval_id):
+        return next(e for e in api.get("/v1/state", headers=OP_H).json()["events"] if e["id"] == approval_id)
+    yes = call(api, tool="credit_report").json()["approval_id"]
+    assert row(yes)["status"] == "held"
+    api.post(f"/v1/approvals/{yes}/approve", headers=OP_H)
+    assert row(yes)["status"] == "approved" and row(yes)["reason_code"] == "approved"
+    no = call(api, task="t2", tool="credit_report").json()["approval_id"]
+    api.post(f"/v1/approvals/{no}/deny", headers=OP_H)
+    assert row(no)["status"] == "denied" and "said no" in row(no)["reason"]
+    assert api.post(f"/v1/approvals/{no}/approve", headers=OP_H).status_code == 409   # can't change a decision
+    assert row(no)["status"] == "denied"

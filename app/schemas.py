@@ -71,7 +71,7 @@ class EventView(BaseModel):
     vendor: str | None
     amount: str | None
     decision: Literal["allow", "hold", "deny"]
-    status: Literal["reserved", "settled", "held", "blocked", "failed", "control"]
+    status: Literal["reserved", "settled", "held", "approved", "denied", "blocked", "failed", "control"]
     reason_code: str | None
     reason: str | None
     tx: str | None

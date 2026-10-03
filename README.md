@@ -135,7 +135,8 @@ The web app is live at **[https://solana-hal-payments.lovable.app/](https://sola
 
 | Method | Path | Who | Purpose |
 |---|---|---|---|
-| GET | `/health` | anyone | Status, payment mode, whether a token is needed |
+| GET | `/v1/status` | anyone | Status, payment mode, whether a token is needed (used by the web app) |
+| GET | `/health` | anyone | Same as `/v1/status`, for Render's health check (some ad blockers block this address) |
 | GET | `/v1/catalog` | anyone | What agents can buy, agreed prices, agent rules |
 | GET | `/v1/demo/steps` | anyone | The guided tour's steps in plain words |
 | POST | `/v1/early-access` | anyone | Sign up for early access (rate-limited, spam trap) |

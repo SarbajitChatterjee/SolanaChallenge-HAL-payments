@@ -1,3 +1,8 @@
+"""AgentBudget API.
+
+    uvicorn app.main:create_app --factory --port 8000
+"""
+
 from __future__ import annotations
 
 import logging
@@ -18,7 +23,7 @@ from .schemas import HealthView
 from .service import SpendService
 from .settings import Settings
 
-VERSION = "1.1.0"
+VERSION = "1.4.0"
 log = logging.getLogger("agentbudget")
 
 
@@ -94,7 +99,8 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
-    @app.get("/health", response_model=HealthView, tags=["public"])
+    @app.get("/health", response_model=HealthView, tags=["public"])          # for Render's health check
+    @app.get("/v1/status", response_model=HealthView, tags=["public"])       # for the web app (ad blockers block /health)
     async def health():
         return HealthView(ok=True, version=VERSION, rail=rail.name, network=getattr(rail, "network", None),
                           database="postgres" if repo.is_postgres else "sqlite",
