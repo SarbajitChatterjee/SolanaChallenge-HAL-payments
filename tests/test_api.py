@@ -10,6 +10,16 @@ def call(api, headers=AGENT_H, agent="research-agent", task="t1", **body):
     return api.post(f"/v1/agents/{agent}/call", json={"task_id": task, **body}, headers=headers)
 
 
+def set_reuse(api, tool, seconds, scope="agent"):
+    """Change an item's reuse window directly (the Rules page does not edit it)."""
+    from sqlalchemy import update
+    from app.db import catalog_items
+    with api.app.state.repo.engine.begin() as conn:
+        conn.execute(update(catalog_items).where(catalog_items.c.tool == tool)
+                     .values(reuse_ttl_seconds=seconds, reuse_scope=scope))
+    api.app.state.rules.invalidate()
+
+
 def research(api):
     return next(a for a in api.get("/v1/state", headers=OP_H).json()["agents"] if a["agent_id"] == "research-agent")
 
@@ -155,7 +165,9 @@ def test_waiting_row_turns_into_the_decision(api):
 
 # ---- loop protection: repeat rule and circuit breaker (feat/1.2) ------------------------------------------
 def test_new_task_ids_do_not_get_around_the_limits(api):
-    """The review's probe: a loop with a new task id for every call. Before this fix, 500 of 600 calls were paid."""
+    """The review's probe: a loop with a new task id for every call. Before this fix, 500 of 600 calls were paid.
+    Reuse is off here, so the repeat rule is what stops it."""
+    set_reuse(api, "news_search", 0)
     results = [call(api, task=f"loop-{i}", tool="news_search", params={"q": "Duping Bahn"}) for i in range(600)]
     codes = [r.json().get("reason_code") for r in results]
     assert codes.count("paid") == 2
@@ -164,6 +176,7 @@ def test_new_task_ids_do_not_get_around_the_limits(api):
 
 
 def test_same_purchase_is_paid_at_most_twice(api):
+    set_reuse(api, "fx_rate", 0)
     first, second, third = (call(api, task=f"t{i}", tool="fx_rate", params={"pair": "EURUSD"}) for i in range(3))
     assert first.status_code == second.status_code == 200
     assert third.status_code == 403 and third.json()["reason_code"] == "repeat_purchase"
@@ -286,3 +299,79 @@ def test_a_status_check_wakes_the_seller_services(api):
     api.app.state.waker.wake = fake_wake
     assert api.get("/v1/status").status_code == 200 and api.get("/health").status_code == 200
     assert len(calls) == 2
+
+
+# ---- purchase reuse (feat/2.3) -------------------------------------------------------------------------------
+def test_second_identical_purchase_is_reused_and_costs_nothing(api):
+    first = call(api, task="a", tool="fx_rate", params={"pair": "EURUSD"}).json()
+    spent = research(api)["spent_today"]
+    second = call(api, task="b", tool="fx_rate", params={"pair": " eurusd "})          # same after normalising
+    body = second.json()
+    assert second.status_code == 200 and body["status"] == "reused" and body["reason_code"] == "reused"
+    assert body["amount"] == "0.00" and body["saved"] == "0.01" and body["tx"] == first["tx"]
+    assert body["data"] == first["data"] and body["reused_from"]
+    assert research(api)["spent_today"] == spent                                        # the budget did not move
+    assert call(api, task="c", tool="fx_rate", params={"pair": "GBPUSD"}).json()["reason_code"] == "paid"
+
+
+def test_reuse_comes_before_the_repeat_rule(api):
+    codes = [call(api, task=f"loop-{i}", tool="fx_rate", params={"pair": "EURUSD"}).json()["reason_code"]
+             for i in range(40)]
+    assert codes[0] == "paid" and "repeat_purchase" not in codes
+    assert codes[1:30] == ["reused"] * 29 and codes[30] == "circuit_breaker"             # reused calls still count
+    assert research(api)["frozen"] is True
+
+
+def test_reused_news_keeps_the_firewall_result(api):
+    first = call(api, tool="news_search", params={"q": "Duping Bahn"}).json()
+    again = call(api, task="t2", tool="news_search", params={"q": "Duping Bahn"}).json()
+    assert again["status"] == "reused" and again["data"] == first["data"]
+    assert again["data"]["items"][1]["body"] == "[removed by HAL: instructions aimed at agents]"
+    assert again["content_flags"] == first["content_flags"]
+
+
+def test_credit_report_is_never_reused(api):
+    held = call(api, tool="credit_report", params={"name": "Duping Bahn GmbH"}).json()
+    api.post(f"/v1/approvals/{held['approval_id']}/approve", headers=OP_H)
+    assert call(api, tool="credit_report", params={"name": "Duping Bahn GmbH"},
+                approval_id=held["approval_id"]).json()["reason_code"] == "paid"
+    again = call(api, task="t2", tool="credit_report", params={"name": "Duping Bahn GmbH"})
+    assert again.status_code == 202 and again.json()["reason_code"] == "needs_approval"
+
+
+def test_reuse_is_per_agent_unless_the_item_says_org(api):
+    call(api, tool="fx_rate", params={"pair": "EURUSD"})
+    assert call(api, headers=INTERN_H, agent="intern-agent", tool="fx_rate",
+                params={"pair": "EURUSD"}).json()["reason_code"] == "paid"
+    set_reuse(api, "fx_rate", 3600, scope="org")
+    call(api, tool="fx_rate", params={"pair": "GBPUSD"})
+    assert call(api, headers=INTERN_H, agent="intern-agent", tool="fx_rate",
+                params={"pair": "GBPUSD"}).json()["reason_code"] == "reused"
+
+
+def test_expired_results_are_paid_again_and_deleted(api):
+    from sqlalchemy import func, select, update
+    from app.db import purchase_payloads, utcnow
+    call(api, tool="fx_rate", params={"pair": "EURUSD"})
+    with api.app.state.repo.engine.begin() as conn:
+        conn.execute(update(purchase_payloads).values(expires_at=utcnow()))
+    assert call(api, task="t2", tool="fx_rate", params={"pair": "EURUSD"}).json()["reason_code"] == "paid"
+    with api.app.state.repo.engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(purchase_payloads)).scalar_one() == 1  # old one gone
+
+
+def test_no_payload_is_stored_for_items_without_reuse(api):
+    from sqlalchemy import func, select
+    from app.db import purchase_payloads
+    set_reuse(api, "fx_rate", 0)
+    call(api, tool="fx_rate", params={"pair": "EURUSD"})
+    with api.app.state.repo.engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(purchase_payloads)).scalar_one() == 0
+
+
+def test_parallel_identical_calls_with_reuse_never_overspend(api):
+    with ThreadPoolExecutor(max_workers=24) as pool:
+        codes = list(pool.map(lambda i: call(api, task=f"p{i}", tool="company_lookup",
+                                             params={"name": "Duping Bahn GmbH"}).json()["reason_code"], range(24)))
+    assert codes.count("paid") <= 2 and set(codes) <= {"paid", "reused", "repeat_purchase"}
+    assert research(api)["spent_today"] == f"{0.05 * codes.count('paid'):.2f}"

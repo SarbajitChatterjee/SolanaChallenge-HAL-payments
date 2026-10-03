@@ -30,7 +30,8 @@ log = logging.getLogger("agentbudget.db")
 
 PG_SCHEMA = "agentbudget"
 MICRO = Decimal(10**6)
-COUNTED = ("reserved", "settled")  # statuses that consume budget
+COUNTED = ("reserved", "settled")  # statuses that consume budget ("reused" never does)
+MAX_PAYLOAD_BYTES = 256 * 1024
 
 metadata = MetaData()
 
@@ -253,7 +254,8 @@ class AgentTx:
     def record(self, *, task_id: str, decision: str, status: str, reason: str, reason_code: str,
                tool: str | None = None, url: str | None = None, vendor: str | None = None,
                amount: Decimal | None = None, event_id: str | None = None, fingerprint: str | None = None,
-               params_json: str | None = None, caused_by_event_id: str | None = None) -> str:
+               params_json: str | None = None, caused_by_event_id: str | None = None,
+               reused_from_event_id: str | None = None) -> str:
         event_id = event_id or new_id()
         now = utcnow()
         self.conn.execute(insert(events).values(
@@ -263,7 +265,8 @@ class AgentTx:
         if fingerprint is not None:
             self.conn.execute(insert(event_details).values(event_id=event_id, agent_id=self.agent_id, created_at=now,
                                                            fingerprint=fingerprint, params_json=params_json,
-                                                           caused_by_event_id=caused_by_event_id))
+                                                           caused_by_event_id=caused_by_event_id,
+                                                           reused_from_event_id=reused_from_event_id))
         return event_id
 
     # ---- loop protection (repeat rule and circuit breaker) ----
@@ -286,6 +289,21 @@ class AgentTx:
             select(func.count()).select_from(event_details.join(events, events.c.id == event_details.c.event_id))
             .where(event_details.c.agent_id == self.agent_id, event_details.c.fingerprint == fingerprint,
                    event_details.c.created_at >= since, events.c.status.in_(COUNTED))).scalar_one())
+
+    # ---- purchase reuse ----
+    def find_reusable(self, fingerprint: str, *, org_wide: bool) -> dict | None:
+        """The newest settled purchase with this fingerprint whose stored result has not expired."""
+        q = (select(events.c.id, events.c.tx, events.c.created_at, purchase_payloads.c.body_json,
+                    event_details.c.content_flags_json)
+             .select_from(event_details.join(events, events.c.id == event_details.c.event_id)
+                          .join(purchase_payloads, purchase_payloads.c.event_id == events.c.id))
+             .where(event_details.c.fingerprint == fingerprint, events.c.status == "settled",
+                    purchase_payloads.c.expires_at > utcnow())
+             .order_by(events.c.created_at.desc()).limit(1))
+        if not org_wide:
+            q = q.where(event_details.c.agent_id == self.agent_id)
+        row = self.conn.execute(q).mappings().first()
+        return dict(row) if row else None
 
     # ---- provenance: where a link came from, and sellers under review ----
     def lookup_link(self, url_normalized: str, since: datetime) -> dict | None:
@@ -435,6 +453,18 @@ class Repository:
         with self.engine.begin() as conn:
             _set_seller_status(conn, origin, "active", by)
 
+    def store_payload(self, event_id: str, data, ttl_seconds: int) -> bool:
+        """Keep a paid result for reuse (max 256 KB). Expired results are deleted on the way."""
+        body = json.dumps(data, default=str)
+        if len(body.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+            return False
+        now = utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(delete(purchase_payloads).where(purchase_payloads.c.expires_at <= now))
+            conn.execute(insert(purchase_payloads).values(event_id=event_id, body_json=body,
+                                                          expires_at=now + timedelta(seconds=ttl_seconds)))
+        return True
+
     def record_content_flags(self, event_id: str, flags: list[dict]) -> None:
         with self.engine.begin() as conn:
             conn.execute(update(event_details).where(event_details.c.event_id == event_id)
@@ -493,7 +523,8 @@ class Repository:
     def _item_row(r) -> dict:
         return {"tool": r["tool"], "name": r["name"], "description": r["description"] or "", "vendor": r["vendor"],
                 "url": r["url"], "price": from_micros(r["price_micros"]), "active": bool(r["active"]),
-                "content_policy": r["content_policy"],
+                "content_policy": r["content_policy"], "reuse_ttl_seconds": r["reuse_ttl_seconds"],
+                "reuse_scope": r["reuse_scope"],
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
     @staticmethod
@@ -509,7 +540,9 @@ class Repository:
     def _item_values(i: dict) -> dict:
         return {"tool": i["tool"], "name": i.get("name") or i["tool"], "description": i.get("description") or "",
                 "vendor": i["vendor"], "url": i["url"], "price_micros": to_micros(Decimal(str(i["price"]))),
-                "active": i.get("active", True), "content_policy": i.get("content_policy") or "annotate"}
+                "active": i.get("active", True), "content_policy": i.get("content_policy") or "annotate",
+                "reuse_ttl_seconds": int(i.get("reuse_ttl_seconds") or 0),
+                "reuse_scope": i.get("reuse_scope") or "agent"}
 
     def list_agents(self) -> list[dict]:
         with self.engine.connect() as conn:

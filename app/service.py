@@ -10,11 +10,13 @@ Every answer has the same shape: decision, status, reason_code (for software) an
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -71,7 +73,7 @@ class SpendService:
     async def call(self, agent_id: str, req: CallRequest) -> Outcome:
         decided = await asyncio.to_thread(self._decide_and_reserve, agent_id, req)
         if isinstance(decided, Outcome):
-            return decided
+            return decided  # blocked, held, or reused (nothing to pay)
         item = decided.item
         try:
             result = await self.rail.pay_and_fetch(agent_id=agent_id, url=item.url, max_price=item.price,
@@ -103,6 +105,10 @@ class SpendService:
         if links:
             await asyncio.to_thread(self.repo.record_links, event_id=decided.event_id, agent_id=agent_id,
                                     origin=origin(item.url), links=links)
+
+        # Purchase reuse: keep the cleaned result, so the same purchase in the window costs nothing.
+        if item.reuse_ttl_seconds > 0:
+            await asyncio.to_thread(self.repo.store_payload, decided.event_id, data, item.reuse_ttl_seconds)
         return answer(200, "allow", "settled", "paid", message, amount=usd(item.price), vendor=item.vendor,
                       tool=item.tool, item_name=item.name or item.tool, tx=result.tx,
                       explorer_url=self.explorer_url(result.tx), data=data, content_flags=flags)
@@ -142,7 +148,12 @@ class SpendService:
                 return max(start, floor) if floor else start
 
             spend = SpendRequest(agent_id=agent_id, task_id=req.task_id, tool=req.tool, url=req.url)
-            target = resolve(spend, catalog.items)  # only to look up the seller's review status
+            target = resolve(spend, catalog.items)  # only to look up the seller's review status and reuse
+
+            # Reuse needs no payment. A purchase a person approved is always paid, as approved.
+            stored = None
+            if target and target.reuse_ttl_seconds > 0 and not approved:
+                stored = tx.find_reusable(fp, org_wide=target.reuse_scope == "org")
             verdict = evaluate(
                 spend, policy=policy, catalog=catalog.items,
                 spent_task=tx.spent(task_id=req.task_id), spent_today=tx.spent(since=start_of_day()),
@@ -150,7 +161,8 @@ class SpendService:
                 repeat_count=tx.count_fingerprint_since(fp, now - timedelta(minutes=policy.repeat_window_minutes)),
                 attempts_last_min=tx.count_attempts_since(since(timedelta(minutes=1))),
                 spent_last_10m=tx.spent(since=since(timedelta(minutes=10))),
-                seller_under_review=bool(target) and tx.seller_under_review(origin(target.url)))
+                seller_under_review=bool(target) and tx.seller_under_review(origin(target.url)),
+                reusable=stored is not None)
             item = verdict.item
 
             if approved and (item is None or item.tool != tx.get_approval(req.approval_id)["tool"]):
@@ -173,6 +185,9 @@ class SpendService:
                         tx.freeze(verdict.message)  # only a person can switch the agent back on
                     return answer(403, "deny", "blocked", verdict.code.value, verdict.message)
                 return self._trace_to_seller(tx, source, verdict.message, common)
+
+            if verdict.code is Reason.REUSED:
+                return self._reuse(tx, item, stored, common)
 
             if verdict.decision is Decision.HOLD:
                 approval_id = tx.create_approval(task_id=req.task_id, tool=item.tool, vendor=item.vendor,
@@ -205,6 +220,19 @@ class SpendService:
                   caused_by_event_id=source["source_event_id"], **common)
         return answer(403, "deny", "blocked", Reason.NOT_IN_CATALOG.value, message,
                       caused_by=source["source_event_id"], caused_by_seller=vendor)
+
+    def _reuse(self, tx, item: CatalogItem, stored: dict, common: dict) -> Outcome:
+        """Answer with the stored result of an earlier purchase. Nothing is paid, and no budget is used."""
+        at = stored["created_at"].strftime("%H:%M")
+        message = (f"Reused the result of purchase {stored['id'][:4]} from {at} UTC. Nothing was paid "
+                   f"(saved {usd(item.price)} USD).")
+        common = {**common, "amount": Decimal("0"), "reason": message}
+        tx.record(decision="allow", status="reused", reused_from_event_id=stored["id"], **common)
+        return answer(200, "allow", "reused", Reason.REUSED.value, message, amount=usd(Decimal("0")),
+                      saved=usd(item.price), vendor=item.vendor, tool=item.tool, item_name=item.name or item.tool,
+                      reused_from=stored["id"], tx=stored["tx"], explorer_url=self.explorer_url(stored["tx"]),
+                      data=json.loads(stored["body_json"]),
+                      content_flags=json.loads(stored["content_flags_json"] or "[]"))
 
     def sellers(self) -> list[dict[str, Any]]:
         """Every seller in the rules or with a record, with its status and incident count."""
