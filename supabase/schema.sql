@@ -83,6 +83,74 @@ create table if not exists agentbudget.audit_log (
   details     text                              -- JSON: {"field": [old, new]}
 );
 
+-- Purchase firewall (feat/7.1). The API also adds these itself on startup.
+alter table agentbudget.agents add column if not exists max_repeats integer not null default 2;
+alter table agentbudget.agents add column if not exists repeat_window_minutes integer not null default 60;
+alter table agentbudget.agents add column if not exists max_attempts_per_min integer not null default 30;
+alter table agentbudget.agents add column if not exists velocity_share_10m double precision not null default 0.2;
+alter table agentbudget.catalog_items add column if not exists reuse_ttl_seconds integer not null default 0;
+alter table agentbudget.catalog_items add column if not exists reuse_scope varchar(8) not null default 'agent';
+alter table agentbudget.catalog_items add column if not exists content_policy varchar(16) not null default 'annotate';
+alter table agentbudget.catalog_items add column if not exists expect_json text;
+
+-- A seller is identified by its origin (scheme://host)
+create table if not exists agentbudget.event_details (
+  event_id              varchar(24) primary key,
+  agent_id              varchar(64) not null,
+  created_at            timestamptz not null,
+  fingerprint           varchar(64),            -- SHA-256 of tool + canonical params
+  params_json           text,
+  quoted_price_micros   bigint,
+  caused_by_event_id    varchar(24),
+  reused_from_event_id  varchar(24),
+  content_flags_json    text,
+  delivery_status       varchar(24),
+  match_status          varchar(24)
+);
+create index if not exists ix_event_details_fingerprint on agentbudget.event_details (agent_id, fingerprint, created_at);
+
+create table if not exists agentbudget.purchase_payloads (
+  event_id    varchar(24) primary key,
+  body_json   text not null,                    -- max 256 KB, only for items with reuse
+  expires_at  timestamptz not null
+);
+
+create table if not exists agentbudget.content_links (
+  id               varchar(24) primary key,
+  url_normalized   text not null,
+  source_event_id  varchar(24) not null,
+  seller_origin    varchar(256) not null,
+  agent_id         varchar(64) not null,
+  created_at       timestamptz not null
+);
+create index if not exists ix_content_links_url on agentbudget.content_links (url_normalized);
+
+create table if not exists agentbudget.seller_status (
+  seller_origin  varchar(256) primary key,
+  status         varchar(16) not null default 'active',   -- active | under_review
+  updated_at     timestamptz not null,
+  updated_by     varchar(32)
+);
+
+create table if not exists agentbudget.seller_incidents (
+  id             varchar(24) primary key,
+  seller_origin  varchar(256) not null,
+  kind           varchar(16) not null,                    -- injection | delivery | overquote
+  event_id       varchar(24),
+  created_at     timestamptz not null
+);
+create index if not exists ix_seller_incidents_origin on agentbudget.seller_incidents (seller_origin);
+
+create table if not exists agentbudget.claims (
+  id             varchar(24) primary key,
+  event_id       varchar(24) not null,
+  seller_origin  varchar(256) not null,
+  amount_micros  bigint not null,
+  status         varchar(16) not null default 'open',
+  evidence_json  text,
+  created_at     timestamptz not null
+);
+
 -- Belt and braces: even if someone exposes the schema later, anon/authenticated roles get nothing.
 alter table agentbudget.agent_state enable row level security;
 alter table agentbudget.events      enable row level security;
@@ -91,4 +159,10 @@ alter table agentbudget.early_access enable row level security;
 alter table agentbudget.agents        enable row level security;
 alter table agentbudget.catalog_items enable row level security;
 alter table agentbudget.audit_log     enable row level security;
+alter table agentbudget.event_details enable row level security;
+alter table agentbudget.purchase_payloads enable row level security;
+alter table agentbudget.content_links enable row level security;
+alter table agentbudget.seller_status enable row level security;
+alter table agentbudget.seller_incidents enable row level security;
+alter table agentbudget.claims enable row level security;
 revoke all on schema agentbudget from anon, authenticated;
