@@ -27,7 +27,7 @@ from .schemas import HealthView
 from .service import SpendService
 from .settings import Settings
 
-VERSION = "1.5.5"
+VERSION = "1.6.3"
 log = logging.getLogger("agentbudget")
 
 

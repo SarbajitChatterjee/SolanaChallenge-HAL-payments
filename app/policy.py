@@ -6,7 +6,8 @@ Checks run in this order, cheapest and most absolute first:
   3. approved list       -> deny  (unknown seller, or item this agent may not buy)
   4. repeat rule         -> deny  (the same purchase was already paid too often)
   5. budgets             -> deny  (per task and per day, money already reserved included)
-  6. approval limit      -> hold  (a person decides)
+  6. seller under review -> hold  (the seller sent a trap; a person decides)
+  7. approval limit      -> hold  (a person decides)
 Whatever passes is allowed.
 
 The breaker comes before the other checks so that a loop of blocked attempts also trips it.
@@ -39,6 +40,7 @@ class Reason(str, Enum):
     NEEDS_APPROVAL = "needs_approval"
     REPEAT_PURCHASE = "repeat_purchase"
     CIRCUIT_BREAKER = "circuit_breaker"
+    SELLER_UNDER_REVIEW = "seller_under_review"
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,12 @@ def _normalize(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/").lower()
 
 
+def origin(url: str) -> str:
+    """The seller key: scheme://host[:port]. Two items from one origin are one seller."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
 def resolve(req: SpendRequest, catalog: dict[str, CatalogItem]) -> CatalogItem | None:
     """Map a request to an approved item. Raw URLs must match an approved URL exactly."""
     if req.tool:
@@ -113,6 +121,7 @@ def evaluate(
     repeat_count: int = 0,
     attempts_last_min: int = 0,
     spent_last_10m: Decimal = Decimal("0"),
+    seller_under_review: bool = False,
 ) -> Verdict:
     if frozen:
         return Verdict(Decision.DENY, Reason.FROZEN, "This agent is stopped. Someone flipped the kill switch.")
@@ -152,6 +161,11 @@ def evaluate(
                        f"already used.", item)
 
     # Budgets come first on purpose: never ask a person to approve what the budget forbids anyway.
+    if seller_under_review and not approved:
+        return Verdict(Decision.HOLD, Reason.SELLER_UNDER_REVIEW,
+                       f"{item.vendor} is under review because it sent a link an agent was told to buy. "
+                       f"A person has to approve purchases from it.", item)
+
     if item.price > policy.approval_above and not approved:
         return Verdict(Decision.HOLD, Reason.NEEDS_APPROVAL,
                        f"{usd(item.price)} USD is above the {usd(policy.approval_above)} USD limit for automatic "
