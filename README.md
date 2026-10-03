@@ -1,8 +1,10 @@
-# AgentBudget
+# HAL
+
+*Project renamed to HAL. However, some technical names (Render services, database schema) can still use `agentbudget`.*
 
 **Let AI agents buy what they need. Within your rules.**
 
-AgentBudget is a spending account for AI agents:
+HAL is a spending account for AI agents:
 - Small purchases go through on their own.
 - Big ones wait for a person.
 - Purchases from unknown sellers are blocked.
@@ -13,7 +15,7 @@ AgentBudget is a spending account for AI agents:
 
 Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This repo is the **backend** (FastAPI on Render, Supabase Postgres).
 
-![AgentBudget: how a purchase flows](docs/architecture.svg)
+![HAL: how a purchase flows](docs/architecture.svg)
 
 *Both diagrams are animated on GitHub. For slides use the GIFs ([overview](docs/architecture.gif), [system](docs/architecture-technical.gif)) or the PNGs. The system view is under [Architecture details](#architecture-details).*
 
@@ -29,7 +31,7 @@ How we answer each point of the listing: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 
 ## The problem in one paragraph
 
-Agents can now pay for data per request: a company record for 5 cents, an exchange rate for 1 cent. Teams give their agent a wallet and hope. If the agent gets tricked by text it reads, gets stuck in a loop, or a seller raises the price, the wallet empties. The only alternative today is approving every purchase by hand. AgentBudget sits between the agent and its money and applies the rules a person set.
+Agents can now pay for data per request: a company record for 5 cents, an exchange rate for 1 cent. Teams give their agent a wallet and hope. If the agent gets tricked by text it reads, gets stuck in a loop, or a seller raises the price, the wallet empties. The only alternative today is approving every purchase by hand. HAL sits between the agent and its money and applies the rules a person set.
 
 ## What it controls
 
@@ -52,7 +54,7 @@ Every answer comes with a `reason_code` for software and a `reason` in plain wor
 1. **Add your agent** on the Rules page: what it may buy, its task and daily budgets, and above which amount it needs your OK. It gets its own key and wallet automatically (`GET /v1/agents/{agent_id}/key`).
 2. **Add the sellers** your agent buys from: their address and the price you agreed to. Any service that takes payment per request on Solana works.
 3. **Fill the wallet.** On the test network this happens automatically. With real money it would be USDC sent to the agent's wallet address.
-4. **Change one line in your agent:** ask AgentBudget instead of calling the seller directly (below).
+4. **Change one line in your agent:** ask HAL instead of calling the seller directly (below).
 5. **Watch the dashboard:** approve big purchases, flip the kill switch, download the ledger.
 
 ## Connect your agent
@@ -173,7 +175,7 @@ The web app is live at **[https://solana-hal-payments.lovable.app/](https://sola
 
 ## Architecture details
 
-![AgentBudget system architecture](docs/architecture-technical.svg)
+![HAL system architecture](docs/architecture-technical.svg)
 
 The API keeps no state of its own; everything lives in Postgres. Budget decisions lock one agent's row while they check and reserve the money, so several API instances can never spend the same budget twice. The guided tour and the rate limiter keep their state in memory, so they assume one instance (fine on Render's free plan).
 
