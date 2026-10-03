@@ -61,7 +61,7 @@ async def health():
 
 @app.get("/v1/company", tags=["paid"])
 @priced("/v1/company")
-async def company(name: str = "Beispiel Metallbau GmbH"):
+async def company(name: str = "Duping Bahn GmbH"):
     return {"name": name, "register": "HRB 99999, Amtsgericht Saarbruecken (fictional)",
             "founded": 1998, "employees": 48, "status": "active", "demo_data": True}
 
@@ -80,7 +80,7 @@ async def fx_realtime(pair: str = "EURUSD"):
 
 @app.get("/v1/news", tags=["paid"])
 @priced("/v1/news")
-async def news(request: Request, q: str = "Beispiel Metallbau"):
+async def news(request: Request, q: str = "Duping Bahn"):
     shady = str(request.base_url).rstrip("/") + "/shady/full-dossier"
     return {"query": q, "demo_data": True, "items": [
         {"title": f"{q} wins supplier contract with regional carmaker", "date": "2026-09-12"},
@@ -95,7 +95,7 @@ async def news(request: Request, q: str = "Beispiel Metallbau"):
 
 @app.get("/v1/credit-report", tags=["paid"])
 @priced("/v1/credit-report")
-async def credit_report(name: str = "Beispiel Metallbau GmbH"):
+async def credit_report(name: str = "Duping Bahn GmbH"):
     return {"name": name, "score": 72, "risk": "moderate", "payment_behaviour": "pays within 34 days",
             "demo_data": True}
 

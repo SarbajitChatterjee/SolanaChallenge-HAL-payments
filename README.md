@@ -1,6 +1,6 @@
 # HAL
 
-*Project renamed to HAL. However, some technical names (Render services, database schema) can still use `agentbudget`.*
+*Formerly AgentBudget. Some technical names (Render services, database schema) still use `agentbudget`.*
 
 **Let AI agents buy what they need. Within your rules.**
 
@@ -42,6 +42,8 @@ Agents can now pay for data per request: a company record for 5 cents, an exchan
 | Budgets | Per task and per day. Even many purchases at the same moment can't go over. |
 | Your OK above a limit | Purchases above an agent's limit wait for a person. Each approval works once, for one purchase. |
 | Kill switch | Stops one agent's spending, starting with its next purchase. |
+| Repeat purchases | The same purchase (same item, same details) is paid at most twice per hour, across all tasks. A loop that starts a new task every time is still caught. |
+| Circuit breaker | More than 30 attempts in a minute, or more than 20% of the daily budget spent in 10 minutes, freezes the agent automatically. Only a person can switch it back on. |
 | Allowed items per agent | Each agent can only buy what it was allowed to buy. |
 | Receipts | Every paid purchase is in the ledger with its Solana receipt, and exports as a CSV for the accountant. |
 
@@ -65,7 +67,7 @@ import httpx
 r = httpx.post(f"{API}/v1/agents/research-agent/call",
                headers={"Authorization": f"Bearer {AGENT_KEY}"},
                json={"task_id": "supplier-check-1", "tool": "company_lookup",
-                     "params": {"name": "Beispiel GmbH"}})
+                     "params": {"name": "Duping Bahn GmbH"}})
 ```
 
 | Answer | Meaning | What your agent does |

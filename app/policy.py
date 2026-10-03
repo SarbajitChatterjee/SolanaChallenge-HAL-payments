@@ -2,10 +2,15 @@
 
 Checks run in this order, cheapest and most absolute first:
   1. kill switch         -> deny
-  2. approved list       -> deny  (unknown seller, or item this agent may not buy)
-  3. budgets             -> deny  (per task and per day, money already reserved included)
-  4. approval limit      -> hold  (a person decides)
+  2. circuit breaker     -> deny, and the caller freezes the agent (too many attempts, or spending too fast)
+  3. approved list       -> deny  (unknown seller, or item this agent may not buy)
+  4. repeat rule         -> deny  (the same purchase was already paid too often)
+  5. budgets             -> deny  (per task and per day, money already reserved included)
+  6. approval limit      -> hold  (a person decides)
 Whatever passes is allowed.
+
+The breaker comes before the other checks so that a loop of blocked attempts also trips it.
+Its threshold (30 attempts a minute) is far above the repeat limit, so a loop shows "repeat" first.
 
 Every verdict carries a stable `code` for software and a plain `message` for people.
 """
@@ -32,6 +37,8 @@ class Reason(str, Enum):
     TASK_BUDGET = "task_budget"
     DAILY_BUDGET = "daily_budget"
     NEEDS_APPROVAL = "needs_approval"
+    REPEAT_PURCHASE = "repeat_purchase"
+    CIRCUIT_BREAKER = "circuit_breaker"
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,10 @@ class AgentPolicy:
     daily_cap: Decimal
     approval_above: Decimal
     description: str = ""
+    max_repeats: int = 2                 # the same purchase is paid at most this often...
+    repeat_window_minutes: int = 60      # ...within this window
+    max_attempts_per_min: int = 30       # breaker: more attempts than this in one minute
+    velocity_share_10m: float = 0.2      # breaker: more than this share of the daily cap spent in 10 minutes
 
 
 @dataclass(frozen=True)
@@ -98,9 +109,21 @@ def evaluate(
     spent_today: Decimal,
     frozen: bool,
     approved: bool = False,
+    repeat_count: int = 0,
+    attempts_last_min: int = 0,
+    spent_last_10m: Decimal = Decimal("0"),
 ) -> Verdict:
     if frozen:
         return Verdict(Decision.DENY, Reason.FROZEN, "This agent is stopped. Someone flipped the kill switch.")
+
+    if attempts_last_min >= policy.max_attempts_per_min:
+        return Verdict(Decision.DENY, Reason.CIRCUIT_BREAKER,
+                       f"Stopped automatically: {attempts_last_min + 1} purchase attempts in 60 seconds.")
+    velocity_limit = policy.daily_cap * Decimal(str(policy.velocity_share_10m))
+    if spent_last_10m > velocity_limit:
+        return Verdict(Decision.DENY, Reason.CIRCUIT_BREAKER,
+                       f"Stopped automatically: {usd(spent_last_10m)} USD spent in 10 minutes, more than "
+                       f"{policy.velocity_share_10m:.0%} of the daily budget.")
 
     item = resolve(req, catalog)
     if item is None:
@@ -111,6 +134,11 @@ def evaluate(
     if item.tool not in policy.allowed_tools:
         return Verdict(Decision.DENY, Reason.NOT_ALLOWED,
                        f"{policy.agent_id} isn't allowed to buy {label}.", item)
+
+    if repeat_count >= policy.max_repeats:
+        return Verdict(Decision.DENY, Reason.REPEAT_PURCHASE,
+                       f"This exact purchase was already paid {repeat_count} times in the last "
+                       f"{policy.repeat_window_minutes} minutes.", item)
 
     if spent_task + item.price > policy.per_task_cap:
         return Verdict(Decision.DENY, Reason.TASK_BUDGET,
