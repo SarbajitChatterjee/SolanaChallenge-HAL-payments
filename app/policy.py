@@ -4,6 +4,7 @@ Checks run in this order, cheapest and most absolute first:
   1. kill switch         -> deny
   2. circuit breaker     -> deny, and the caller freezes the agent (too many attempts, or spending too fast)
   3. approved list       -> deny  (unknown seller, or item this agent may not buy)
+  3b. reuse              -> allow, nothing paid (a stored result of the same purchase is still valid)
   4. repeat rule         -> deny  (the same purchase was already paid too often)
   5. budgets             -> deny  (per task and per day, money already reserved included)
   6. seller under review -> hold  (the seller sent a trap; a person decides)
@@ -41,6 +42,7 @@ class Reason(str, Enum):
     REPEAT_PURCHASE = "repeat_purchase"
     CIRCUIT_BREAKER = "circuit_breaker"
     SELLER_UNDER_REVIEW = "seller_under_review"
+    REUSED = "reused"
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ class CatalogItem:
     name: str = ""          # human name, e.g. "Company record"
     description: str = ""
     content_policy: str = "annotate"   # response firewall: annotate | redact
+    reuse_ttl_seconds: int = 0         # purchase reuse: 0 = never reuse (the default until the seller terms allow it)
+    reuse_scope: str = "agent"         # agent | org: who may get a stored result
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,7 @@ def evaluate(
     attempts_last_min: int = 0,
     spent_last_10m: Decimal = Decimal("0"),
     seller_under_review: bool = False,
+    reusable: bool = False,
 ) -> Verdict:
     if frozen:
         return Verdict(Decision.DENY, Reason.FROZEN, "This agent is stopped. Someone flipped the kill switch.")
@@ -144,6 +149,11 @@ def evaluate(
     if item.tool not in policy.allowed_tools:
         return Verdict(Decision.DENY, Reason.NOT_ALLOWED,
                        f"{policy.agent_id} isn't allowed to buy {label}.", item)
+
+    # Reuse comes before the repeat rule: a loop that can get the stored result is never blocked as a repeat.
+    if reusable:
+        return Verdict(Decision.ALLOW, Reason.REUSED, "HAL already bought this. It sent the stored result, "
+                                                      "so nothing was paid.", item)
 
     if repeat_count >= policy.max_repeats:
         return Verdict(Decision.DENY, Reason.REPEAT_PURCHASE,

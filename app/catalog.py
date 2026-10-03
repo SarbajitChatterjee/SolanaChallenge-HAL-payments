@@ -38,7 +38,9 @@ def to_catalog(agent_rows: list[dict], item_rows: list[dict], bases: dict[str, s
         r["tool"]: CatalogItem(tool=r["tool"], url=fill(r["url"], bases),
                                price=Decimal(str(r["price"])), vendor=r["vendor"], name=r.get("name") or "",
                                description=r.get("description") or "",
-                               content_policy=r.get("content_policy") or "annotate")
+                               content_policy=r.get("content_policy") or "annotate",
+                               reuse_ttl_seconds=int(r.get("reuse_ttl_seconds") or 0),
+                               reuse_scope=r.get("reuse_scope") or "agent")
         for r in item_rows if r.get("active", True)
     }
     agents = {
