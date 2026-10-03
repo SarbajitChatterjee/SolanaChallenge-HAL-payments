@@ -55,6 +55,7 @@ def test_mock_payments_need_no_wallets_or_seller_address():
 
 
 def test_derived_keys_are_stable_distinct_and_load_as_wallets():
+    pytest.importorskip("solana_pay_kit")  # wallet keys need the Solana SDK
     a, b = Settings(_env_file=None, **RENDER), Settings(_env_file=None, **RENDER)
     for agent in AGENTS:                                                 # same after a redeploy
         assert a.agent_key_for(agent) == b.agent_key_for(agent) and a.wallet_key_for(agent) == b.wallet_key_for(agent)
