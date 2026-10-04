@@ -44,11 +44,12 @@ STEPS: tuple[Step, ...] = (
          focus="statement"),
     Step("loop", "The agent gets stuck in a loop",
          "The agent crashes and restarts again and again. Each time it starts a new task and buys the same "
-         "exchange rate.",
-         "HAL pays once and sends the stored result for every repeat, so the loop costs nothing extra. "
-         "When the loop doesn't stop, HAL stops the agent by itself: more than 30 attempts in a minute.",
+         "exchange rate. Watch the list: one purchase is paid, the repeats come back as \u201cReused, not "
+         "paid\u201d, and then HAL stops the agent by itself. You switch it back on to continue.",
+         "HAL paid once and sent the stored result for every repeat, so the loop cost nothing extra. "
+         "When the loop didn't stop, HAL stopped the agent on its own: more than 30 attempts in a minute.",
          focus="breaker",
-         your_turn="HAL stopped research-agent automatically. Flip its switch back on to continue."),
+         your_turn="HAL stopped research-agent on its own. Flip its switch so it says Running again."),
     Step("permissions", "The wrong agent tries",
          "The intern agent, which may only buy exchange rates and news, tries to buy a credit report.",
          "Each agent can only buy what you allowed it to buy.",

@@ -59,8 +59,10 @@ def _visitor_tour(api):
 
     api.post("/v1/demo/next", headers=OP_H)                       # overcharge
     wait_until(api, lambda d: d["waiting_for"] == "next" and d["step_key"] == "loop")
-    api.post("/v1/demo/next", headers=OP_H)                       # loop: the breaker stops the agent
-    wait_until(api, lambda d: d["waiting_for"] == "kill_switch_off" and d["step_key"] == "loop")
+    api.post("/v1/agents/research-agent/freeze", headers=OP_H)    # the visitor flips the switch too early
+    api.post("/v1/demo/next", headers=OP_H)                       # loop: switched on, then stopped by the breaker
+    demo = wait_until(api, lambda d: d["waiting_for"] == "kill_switch_off" and d["step_key"] == "loop")
+    assert any(line.startswith("Paid 1 time. Reused ") for line in demo["log"])
     api.post("/v1/agents/research-agent/unfreeze", headers=OP_H)  # the visitor switches it back on
     wait_until(api, lambda d: d["waiting_for"] == "next" and d["step_key"] == "permissions")
     api.post("/v1/demo/next", headers=OP_H)                       # permissions

@@ -169,6 +169,11 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
 
         elif step.key == "loop":
 
+            # The loop needs a running agent. If the visitor stopped it early, switch it back on first.
+            if controls.is_frozen and await controls.is_frozen(AGENT):
+                await http.post(f"/v1/agents/{AGENT}/unfreeze", headers=op)
+                status.log.append("research-agent was stopped, so the tour switched it back on before the loop.")
+
             # A new task on every restart, the same exchange rate each time (News Wire is under review now).
             paid = reused = 0
             stopped = False
