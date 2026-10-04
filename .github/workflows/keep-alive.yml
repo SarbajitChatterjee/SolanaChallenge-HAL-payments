@@ -1,0 +1,35 @@
+name: Keep Alive Ping
+
+on:
+  # Runs every 10 minutes to prevent Render free tier from spinning down
+  schedule:
+    - cron: '*/12 * * * *'
+  
+  # Allows you to trigger it manually from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  ping-services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake up Render services (Trigger cold start)
+        run: |
+          curl -s -o /dev/null https://agentbudget-api-n9y6.onrender.com/health || true
+          curl -s -o /dev/null https://agentbudget-vendors-n9y6.onrender.com/health || true
+          curl -s -o /dev/null https://solanachallenge-hal-payments.onrender.com/health || true
+          curl -s -o /dev/null https://solana-hal-payments.lovable.app/ || true
+
+      - name: Wait 70 seconds for instances to spin up
+        run: sleep 70
+
+      - name: Verify API Service (Alerts if not 200)
+        run: curl -fI https://agentbudget-api-n9y6.onrender.com/health
+
+      - name: Verify Vendors Service (Alerts if not 200)
+        run: curl -fI https://agentbudget-vendors-n9y6.onrender.com/health
+
+      - name: Verify Challenge App Service (Alerts if not 200)
+        run: curl -fI https://solanachallenge-hal-payments.onrender.com/health
+
+      - name: Verify Frontend App (Alerts if not 200)
+        run: curl -fI https://solana-hal-payments.lovable.app/
