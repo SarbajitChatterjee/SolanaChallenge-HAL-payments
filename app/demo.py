@@ -28,6 +28,7 @@ INTERN = "intern-agent"
 NEXT_TIMEOUT_S = 20 * 60        # tour gives up after 20 minutes without a click
 HUMAN_TIMEOUT_TOUR_S = 10 * 60
 HUMAN_TIMEOUT_AUTO_S = 120
+LOOP_MAX_CALLS = 40             # the breaker stops the loop at 31 attempts in a minute
 
 
 class DemoStopped(Exception):
@@ -100,7 +101,7 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
         k = agent_keys.get(agent)
         return {"Authorization": f"Bearer {k}"} if k else {}
 
-    async def buy(agent: str = AGENT, task_id: str = task, **body) -> dict:
+    async def buy(agent: str = AGENT, task_id: str = task, log: bool = True, **body) -> dict:
         r = await http.post(f"/v1/agents/{agent}/call", json={"task_id": task_id, **body}, headers=key(agent))
         out = r.json()
         if r.status_code == 202 and "approval_id" not in body:
@@ -128,8 +129,18 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
             finally:
                 status.waiting_for = None
                 status.approval_id = None
-        status.log.append(out.get("reason") or out.get("detail") or "")
+        if log:
+            status.log.append(out.get("reason") or out.get("detail") or "")
         return out
+
+    async def switch_back_on() -> None:
+        """The visitor (tour) or the script (auto) switches the agent back on."""
+        if tour:
+            if not await controls.wait_for_switch(False, HUMAN_TIMEOUT_TOUR_S):
+                await http.post(f"/v1/agents/{AGENT}/unfreeze", headers=op)
+                status.log.append("No switch was flipped, so the tour switched the agent back on for you.")
+        else:
+            await http.post(f"/v1/agents/{AGENT}/unfreeze", headers=op)
 
     news: dict = {}
     for index, step in enumerate(STEPS, start=1):
@@ -142,8 +153,11 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
             news = await buy(tool="news_search", params={"q": "Duping Bahn"})
 
         elif step.key == "trap":
+
+            # The firewall removed the instruction, but flagged the link. The agent tries it anyway.
+            flagged = [f["extract"] for f in news.get("content_flags", []) if f.get("kind") == "unlisted_link"]
             items = news.get("data", {}).get("items", []) if isinstance(news.get("data"), dict) else []
-            injected = next((i.get("body") for i in items if "body" in i), "") or ""
+            injected = " ".join(flagged + [i.get("body") or "" for i in items])
             found = re.search(r"https?://\S+/shady/full-dossier", injected)
             await buy(url=found.group(0) if found else "https://dossier-deals.example/full-dossier")
 
@@ -154,8 +168,23 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
             await buy(tool="fx_realtime", params={"pair": "EURUSD"})
 
         elif step.key == "loop":
-            for _ in range(3):
-                await buy(tool="news_search", params={"q": "Duping Bahn"})
+
+            # A new task on every restart, the same exchange rate each time (News Wire is under review now).
+            paid = reused = 0
+            stopped = False
+            for attempt in range(1, LOOP_MAX_CALLS + 1):
+                out = await buy(task_id=f"{task}-restart-{attempt}", tool="fx_rate", params={"pair": "EURCHF"},
+                                log=False)
+                code = out.get("reason_code")
+                paid += code == "paid"
+                reused += code == "reused"
+                if code in ("circuit_breaker", "frozen"):
+                    stopped = True
+                    status.log.append(f"Paid {paid} time{'s' if paid != 1 else ''}. Reused {reused} times, "
+                                      f"for free. {out.get('reason')}")
+                    break
+            if stopped:
+                await switch_back_on()
 
         elif step.key == "permissions":
             await buy(agent=INTERN, tool="credit_report")
@@ -168,14 +197,11 @@ async def run_scenario(http: httpx.AsyncClient, agent_keys: dict[str, str], cont
             else:
                 await http.post(f"/v1/agents/{AGENT}/freeze", headers=op)
             await buy(task_id=f"{task}-after-stop", tool="fx_rate")
-            if tour:
-                if not await controls.wait_for_switch(False, HUMAN_TIMEOUT_TOUR_S):
-                    await http.post(f"/v1/agents/{AGENT}/unfreeze", headers=op)
-            else:
-                await http.post(f"/v1/agents/{AGENT}/unfreeze", headers=op)
+            await switch_back_on()
 
         elif step.key == "ledger":
-            status.log.append("Every paid purchase is in the ledger with its Solana receipt.")
+            status.log.append("Every purchase is in the ledger: paid ones with their Solana receipt, "
+                              "reused ones at 0.00 with the purchase they reused.")
 
 
 class DemoRunner:

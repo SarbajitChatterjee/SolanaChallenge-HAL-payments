@@ -30,6 +30,10 @@ class RailError(Exception):
 class PriceRejected(RailError):
     """The vendor asked for more than the pinned price, so nothing was signed."""
 
+    def __init__(self, message: str, quoted: Decimal | None = None) -> None:
+        super().__init__(message)
+        self.quoted = quoted  # known on the mock rail; pay-kit does not report it yet
+
 
 @dataclass
 class RailResult:
@@ -109,7 +113,8 @@ class MockRail:
             data = _body(resp)
             quoted = Decimal(resp.headers["x-demo-price"]) if "x-demo-price" in resp.headers else None
         if quoted is not None and quoted > max_price:
-            raise PriceRejected(f"Vendor quoted {quoted} USD, pinned price is {max_price} USD. Nothing signed.")
+            raise PriceRejected(f"Vendor quoted {quoted} USD, pinned price is {max_price} USD. Nothing signed.",
+                                quoted=quoted)
         return RailResult(200, data, f"mock-{uuid.uuid4().hex[:16]}")
 
     async def balance(self, agent_id: str) -> Decimal | None:

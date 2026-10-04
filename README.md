@@ -23,8 +23,10 @@ Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). This rep
 
 1. Open the live app: **[https://solana-hal-payments.lovable.app/](https://solana-hal-payments.lovable.app/)** (the first load can take about 30 seconds while the server wakes up). Opening the app also wakes the demo seller services.
 2. Press **Take the 3-minute tour**. You're the person in charge. Press **Run step** to move on.
-   - At step 3 you approve a purchase.
-   - At step 7 you flip the kill switch.
+   - At step 2 HAL traces a hidden trap to the seller that sent it, and puts that seller under review.
+   - At step 3 you approve a purchase. The request shows what the task already bought.
+   - At step 5 a looping agent is paid for once, gets the stored result after that, and is stopped automatically. You switch it back on.
+   - At step 7 you flip the kill switch by hand.
 3. Then open **Be the agent** and try buying things yourself, including the suspicious link.
 
 How we answer each point of the listing: [`docs/PRODUCT.md`](docs/PRODUCT.md).

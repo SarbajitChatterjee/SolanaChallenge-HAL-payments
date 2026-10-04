@@ -290,6 +290,13 @@ class AgentTx:
             .where(event_details.c.agent_id == self.agent_id, event_details.c.fingerprint == fingerprint,
                    event_details.c.created_at >= since, events.c.status.in_(COUNTED))).scalar_one())
 
+    def task_purchases(self, task_id: str) -> list[tuple[str, Decimal]]:
+        """Paid purchases of one task, oldest first: (tool, amount)."""
+        rows = self.conn.execute(select(events.c.tool, events.c.amount_micros).where(
+            events.c.agent_id == self.agent_id, events.c.task_id == task_id, events.c.status == "settled")
+            .order_by(events.c.created_at)).all()
+        return [(r.tool, from_micros(r.amount_micros)) for r in rows]
+
     # ---- purchase reuse ----
     def find_reusable(self, fingerprint: str, *, org_wide: bool) -> dict | None:
         """The newest settled purchase with this fingerprint whose stored result has not expired."""
