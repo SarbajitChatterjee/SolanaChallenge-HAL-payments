@@ -269,7 +269,7 @@ class DemoRunner:
 def _cli() -> None:
     from .settings import Settings
 
-    parser = argparse.ArgumentParser(description="Run the AgentBudget demo against a running API.")
+    parser = argparse.ArgumentParser(description="Run the HAL demo against a running API.")
     parser.add_argument("--base-url", default=os.getenv("API_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--auto-approve", action="store_true")
     args = parser.parse_args()

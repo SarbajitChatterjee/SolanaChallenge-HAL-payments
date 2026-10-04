@@ -1,5 +1,5 @@
 """Purchase fingerprint: the same item with the same params gives the same value,
-whatever the key order, spacing or upper/lower case of the strings."""
+whatever the key order, spacing (also inside a string) or upper/lower case of the strings."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 def _canonical(value: Any) -> Any:
     if isinstance(value, str):
-        return value.strip().lower()
+        return " ".join(value.split()).lower()   # "Duping  Bahn " -> "duping bahn"
     if isinstance(value, dict):
         return {str(k): _canonical(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -19,9 +19,9 @@ def _canonical(value: Any) -> Any:
 
 
 def canonical_json(params: Any) -> str:
-    return json.dumps(_canonical(params or {}), 
-                      sort_keys=True, 
-                      separators=(",", ":"), 
+    return json.dumps(_canonical(params or {}),
+                      sort_keys=True,
+                      separators=(",", ":"),
                       ensure_ascii=False,
                       default=str)
 

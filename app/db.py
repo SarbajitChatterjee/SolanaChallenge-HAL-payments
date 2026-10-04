@@ -657,9 +657,32 @@ class Repository:
         return dict(row) if row else None
 
     def recent_events(self, limit: int = 60) -> list[dict]:
+        q = (select(events, event_details.c.caused_by_event_id, event_details.c.reused_from_event_id,
+                    event_details.c.content_flags_json)
+             .select_from(events.outerjoin(event_details, event_details.c.event_id == events.c.id))
+             .order_by(events.c.created_at.desc()).limit(limit))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(events).order_by(events.c.created_at.desc()).limit(limit)).mappings().all()
+            rows = conn.execute(q).mappings().all()
         return [dict(r) for r in rows]
+
+    def saved(self, agent_id: str, *, since: datetime) -> tuple[Decimal, int]:
+        """Reused purchases since a time: what the original purchases cost, and how many there were."""
+        original = events.alias("original")
+        q = (select(func.coalesce(func.sum(original.c.amount_micros), 0), func.count())
+             .select_from(events.join(event_details, event_details.c.event_id == events.c.id)
+                          .join(original, original.c.id == event_details.c.reused_from_event_id))
+             .where(events.c.agent_id == agent_id, events.c.status == "reused", events.c.created_at >= since))
+        with self.engine.connect() as conn:
+            micros, count = conn.execute(q).one()
+        return from_micros(micros), count
+
+    def frozen_reason(self, agent_id: str) -> str | None:
+        """The message of the newest stop: the kill switch by hand, or the circuit breaker."""
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(events.c.reason).where(events.c.agent_id == agent_id, events.c.status == "control",
+                                              events.c.reason_code.in_(("kill_switch_on", "circuit_breaker")))
+                .order_by(events.c.created_at.desc()).limit(1)).scalar()
 
     def is_frozen(self, agent_id: str) -> bool:
         return self.frozen_map().get(agent_id, False)
@@ -690,17 +713,22 @@ class Repository:
             return conn.execute(delete(early_access).where(early_access.c.email == email)).rowcount == 1
 
     def export_csv(self) -> str:
-        """Paid purchases as a plain CSV: comma-separated, decimal point, one row per payment."""
+        """Delivered purchases as a plain CSV: comma-separated, decimal point. One row per payment, and one row
+        per reused purchase (0.00, with the reference of the payment whose result it reused)."""
+        q = (select(events, event_details.c.reused_from_event_id)
+             .select_from(events.outerjoin(event_details, event_details.c.event_id == events.c.id))
+             .where(events.c.status.in_(("settled", "reused"))).order_by(events.c.created_at))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(events).where(events.c.status == "settled")
-                                .order_by(events.c.created_at)).mappings().all()
+            rows = conn.execute(q).mappings().all()
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
         w.writerow(["Date (UTC)", "Agent", "Task", "Item", "Seller", "Amount", "Currency", "Reference",
-                    "Solana receipt"])
+                    "Solana receipt", "Status", "Reused from"])
         for r in rows:
             created = r["created_at"] if r["created_at"].tzinfo else r["created_at"].replace(tzinfo=timezone.utc)
+            reused = r["status"] == "reused"
             w.writerow([created.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), r["agent_id"], r["task_id"],
                         r["tool"] or "", r["vendor"] or "", money(r["amount_micros"]), "USDC", f"AB-{r['id']}",
-                        r["tx"] or ""])
+                        "" if reused else r["tx"] or "", "reused" if reused else "paid",
+                        f"AB-{r['reused_from_event_id']}" if reused and r["reused_from_event_id"] else ""])
         return buf.getvalue()
