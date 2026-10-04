@@ -12,14 +12,14 @@ Owner: Sarbajit Chatterjee. Status: MVP for Superteam Germany's *Build an MVP wi
 
 | The listing asks | Our answer, in short | Where you see it |
 |---|---|---|
-| Find a real problem | Agents can now pay for data per request. But the only safe options today are no spending at all, or a person approving every purchase. | Home → "The problem"; slide 2 |
-| Explain who you're solving it for | First: teams whose agents already pay per request on Solana. Next: the person who approves their spending. Later: companies that want agents to buy for them. | Home → "Who it's for"; slide 3 |
+| Find a real problem | Agents can now pay for data per request. But the only safe options today are no spending at all, or a person approving every purchase. | Home → "Agents can pay now. Nobody can safely let them." |
+| Explain who you're solving it for | First: teams whose agents already pay per request on Solana. Next: the person who approves their spending. Later: companies that want agents to buy for them. | Home → "You build the agent" / "You approve the spending" |
 | Build a working prototype with a Solana feature | Every purchase is paid in USDC on Solana through Solana Pay Kit, and every payment has a receipt on the blockchain. | Live demo; GitHub |
 | Make it easy for its users to understand and use | A guided 8-step tour where the visitor is in charge, a "Be the agent" playground, plain-language reasons on every decision, and a three-step guide for developers. | Live demo; Connect your agent |
-| Explain what makes it useful | Small purchases happen on their own. Big ones wait for a person. Wrong ones are blocked. A purchase already paid is answered from the stored result. A runaway loop is stopped automatically. Hidden instructions in seller data are removed or flagged, and traced to the seller. One switch stops an agent. Every payment has a receipt. | Tour; Home → "What you control" |
-| Explain how you'd reach first users | An early-access sign-up in the app, plus direct outreach to Solana agent builders: Superteam Germany, the WHU hackathon teams, and sellers listed in Solana's paid-API directory. Free setup for the first 10 teams. | Early access page; slide 8 |
-| A clear role for Solana | Payments of a few cents only make sense with fees of a fraction of a cent. Sellers need no account for the agent. The wallet balance is a hard limit. Each payment is a public receipt. | Home → "Why Solana" calculator; slide 6 |
-| Potential to grow: who would use it, and why | Every team that lets an agent spend money needs these rules. We start where agents already pay today, then follow agent payments into companies. | Slides 8 and 9 |
+| Explain what makes it useful | Small purchases happen on their own. Big ones wait for a person. Wrong ones are blocked. A purchase already paid is answered from the stored result. A runaway loop is stopped automatically. Hidden instructions in seller data are removed or flagged, and traced to the seller. One switch stops an agent. Every payment has a receipt. | Tour; Home → "What you control." |
+| Explain how you'd reach first users | An early-access sign-up in the app, plus direct outreach to Solana agent builders: Superteam Germany, the WHU hackathon teams, and sellers listed in Solana's paid-API directory. Free setup for the first 10 teams. | Early access page |
+| A clear role for Solana | Payments of a few cents only make sense with fees of a fraction of a cent. Sellers need no account for the agent. The wallet balance is a hard limit. Each payment is a public receipt. | Home → "Why this only works on Solana." |
+| Potential to grow: who would use it, and why | Every team that lets an agent spend money needs these rules. We start where agents already pay today, then follow agent payments into companies. | This brief: "How we reach the first 10 users" |
 | Submit a deck link, a public GitHub repo, follow @SuperteamDE, be a WHU participant | Deck link in the submission form; this repo is public. | — |
 | Skills: frontend, backend, blockchain, design | Lovable web app (frontend, design), FastAPI and Supabase (backend), Solana Pay Kit and USDC (blockchain). | README |
 
@@ -69,7 +69,7 @@ These come from how agents pay per request today. They're our working assumption
 
 ## Why Solana
 
-1. **Tiny payments make sense.** A 2-cent purchase costs about 0.0013 USD in network fees on Solana. With typical online card pricing (2.9% + 0.30 USD) it costs more than 30 cents. For 1,000 purchases of 2 cents each: about 300 USD in card fees against 1.30 USD on Solana.
+1. **Tiny payments make sense.** On Solana, the network fee for a payment is a fraction of a cent. With typical online card pricing (2.9% + 0.30 USD), a 2-cent purchase would cost more than 30 cents in fees.
 2. **No accounts with every seller.** The agent pays a seller the moment it asks, without signing up, without an API key and without prepaid credit.
 3. **A limit software can't break.** The agent can never spend more than its wallet holds. On the test network, the wallet is topped up to the daily budget at startup, before each demo and on Reset demo.
 4. **Receipts anyone can check.** Every payment has a public record, which makes the accountant export trustworthy.
