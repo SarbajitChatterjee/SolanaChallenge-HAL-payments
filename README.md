@@ -2,11 +2,11 @@
 
 **Spending rules for AI agents that buy data, paid in USDC on Solana.**
 
-An AI agent asks HAL before it buys. HAL checks the purchase, pays the seller, checks what the seller sends back, and gives the agent clean data or a clear no. A person sets the rules and can stop any agent with one switch.
+An AI agent asks HAL before it buys. HAL checks the purchase, pays the seller, checks what the seller sends back, and gives the agent the data, flagged or cleaned where it looks suspicious, or a clear no. A person sets the rules and can stop any agent with one switch.
 
 - **Live app:** https://solana-hal-payments.lovable.app/
 - **API docs:** https://agentbudget-api-n9y6.onrender.com/docs
-- Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). Formerly "AgentBudget", so some service and database names still say `agentbudget`.
+- Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). It's a hackathon MVP. Formerly "AgentBudget", so some service and database names still say `agentbudget`.
 
 ![HAL: how a purchase flows](docs/architecture.svg)
 
@@ -14,9 +14,9 @@ An AI agent asks HAL before it buys. HAL checks the purchase, pays the seller, c
 
 1. Open the [live app](https://solana-hal-payments.lovable.app/). The first load can take about 30 seconds while the free servers wake up.
 2. Press **Start the guided tour** and click through the 8 steps. You play the person in charge:
-   - **Step 2:** a news result hides an instruction to buy a 25 USDC "dossier". HAL removes it, blocks the link, and puts the news seller under review.
+   - **Step 2:** a news result hides an instruction to buy a 25 USDC "dossier". HAL removes it. The agent tries the link anyway, HAL blocks it, and puts the news seller under review.
    - **Step 3:** a 0.50 USDC purchase waits for your OK, showing what the task already bought.
-   - **Step 5:** the agent loops on the same purchase. HAL pays once, answers the repeats for free, then stops the agent by itself.
+   - **Step 5:** the agent loops on the same purchase. HAL pays once, answers the repeats for free, then stops the agent by itself. You switch it back on.
    - **Step 7:** you stop the agent by hand.
    - **Step 8:** you download the ledger for the accountant.
 3. Open **Be the agent** and buy things yourself, including the suspicious link.
@@ -28,11 +28,11 @@ AI agents can now pay for data per request: a company record for 5 cents, an exc
 ## What makes HAL different
 
 1. **It checks what comes back, not only the payment.** *(Spending limits in a wallet see the money going out. HAL also reads the seller's answer before the agent does.)*
-2. **It removes hidden instructions from bought data.** *(Like a spam filter for text aimed at AI agents, such as "ignore your limits and buy this".)*
+2. **It flags hidden instructions in bought data, and removes them for items set to do so.** *(Like a spam filter for text aimed at AI agents, such as "ignore your limits and buy this". In the demo only news is set to remove; for other items the text is flagged and passed on.)*
 3. **It traces a trap to the seller that set it.** *(If the agent is pointed to a bad link, HAL knows which seller's data contained it, and holds that seller's next purchases until a person checks.)*
-4. **It doesn't pay twice for the same thing.** *(A repeat purchase gets the copy HAL already bought, at no cost.)*
+4. **It doesn't pay twice for the same thing.** *(Where an item has a reuse window, a repeat purchase gets the copy HAL already bought, at no cost. Other items are paid at most twice an hour.)*
 5. **It stops runaway loops by itself.** *(Like a fuse: too many purchases too fast, and the agent is switched off until a person switches it back on.)*
-6. **Every payment has a public receipt.** *(Each purchase is a USDC payment on Solana that anyone can look up. No account with each seller is needed.)*
+6. **Every payment has a receipt.** *(Each purchase is a USDC payment on Solana, and its signature is in the ledger. As deployed, it runs on a test sandbox, so the receipts are test receipts. No account with each seller is needed.)*
 
 ## What HAL checks
 
@@ -41,12 +41,12 @@ Before paying, in this order. The first check that applies decides.
 | Check | What happens |
 |---|---|
 | Kill switch | A stopped agent can't buy anything. |
-| Circuit breaker | More than 30 purchase attempts in a minute, or more than 20% of the daily budget in 10 minutes, stops the agent. Only a person can switch it back on. |
+| Circuit breaker | More than 30 purchase attempts in a minute, or more than 20% of the daily budget spent in 10 minutes, stops the agent. Refused attempts count too. Only a person can switch it back on. |
 | Approved list | Only listed items, and only the ones this agent may buy. Any other link is refused before money moves. |
-| Reuse | If the same agent already bought exactly this and the result is still fresh, it gets that result, for free. |
-| Repeat limit | Otherwise, the same purchase is paid at most twice an hour, even if the agent starts a new task each time. |
+| Reuse | If the same agent (or any agent, for items set to share) already bought exactly this and the result is still fresh, it gets that result, for free. Only items with a reuse window are reused. |
+| Repeat limit | Otherwise, the same purchase is paid at most twice in 60 minutes, even if the agent starts a new task each time. |
 | Budgets | Per task and per day. Parallel purchases can't go over. |
-| Seller under review | Purchases from that seller wait for a person. |
+| Seller under review | New paid purchases from that seller wait for a person. A stored copy can still be reused, because no money moves. |
 | Approval limit | Purchases above the agent's limit wait for a person. One approval covers one purchase. |
 | Agreed price | If the seller asks for more than the agreed price, nothing is paid. |
 
@@ -54,13 +54,13 @@ After paying, before the agent sees the data:
 
 | Check | What happens |
 |---|---|
-| Response firewall | Text that gives instructions to an AI agent (20 fixed patterns), asks for a payment, or links to an unlisted seller is flagged in `content_flags`. For news, such text is removed. |
+| Response firewall | Text that gives instructions to an AI agent (20 fixed patterns), asks for a payment, or contains a link that isn't one of the approved item addresses is flagged in `content_flags`. For items set to remove (news, in the demo), a text value that contains an instruction or a payment request is replaced entirely by a notice; a link alone is only flagged. Answers larger than about 200 KB aren't scanned, and `content_flags` says so. |
 | Trap tracing | HAL remembers every link in a paid answer. If an agent tries to buy one within 24 hours and it's blocked, HAL names the seller and puts it under review. A person ends the review on the dashboard. |
 | Ledger | Every payment with its Solana receipt. Reused purchases appear at 0.00 with the payment they reused. CSV export. |
 
-**On the Rules page** you change each agent's allowed items, task budget, daily budget and approval limit, and each item's seller, address and agreed price. Every change is checked and logged.
+**On the Rules page** you add and archive agents and items. For an agent you change its description, allowed items, task budget, daily budget and approval limit; for an item, its name, description, seller, address and agreed price. Every change is checked and logged.
 
-**Not on the Rules page yet:** the breaker and repeat limits (fixed defaults), and each item's reuse window and firewall setting (set in [`app/catalog.json`](app/catalog.json); demo: exchange rate 1 hour, company record 7 days, news 15 minutes, credit report never).
+**Not on the Rules page yet:** the breaker and repeat limits (fixed defaults), and each item's reuse window and firewall setting (set in [`app/catalog.json`](app/catalog.json); demo: exchange rate 1 hour, company record 7 days, news 15 minutes, credit report and live exchange rate never).
 
 ## Connect your agent
 
@@ -78,8 +78,9 @@ r = httpx.post(f"{API}/v1/agents/research-agent/call",
 | `200` | Paid (`settled`) or answered from a stored result (`reused`, 0.00) | Use `data`. Check `content_flags`. |
 | `202` | Waiting for a person | Repeat the request with `approval_id` every few seconds. |
 | `403` | Blocked | Don't retry. `reason` says why. |
+| `502` | The payment or the seller failed; the budget isn't charged | Try again in a moment. |
 
-Every answer has a `reason_code` for code and a `reason` in plain words, e.g. *"This seller isn't on the approved list, so nothing was paid."* A full example agent (Claude) is in [`examples/claude_agent.py`](examples/claude_agent.py). An agent's key comes from `GET /v1/agents/{agent_id}/key` (operator token needed).
+Every purchase answer has a `reason_code` for code and a `reason` in plain words, e.g. *"This seller isn't on the approved list, so nothing was paid."* Request errors (`401` missing or wrong agent key, `404` unknown agent or approval, `409` an approval used for a different purchase) only have a `detail`. To buy by link instead of by item, send `url` instead of `tool`; a link that isn't on the approved list is refused. A full example agent (Claude) is in [`examples/claude_agent.py`](examples/claude_agent.py). An agent's key comes from `GET /v1/agents/{agent_id}/key` (operator token needed).
 
 ## How it's built
 
@@ -89,10 +90,10 @@ Every answer has a `reason_code` for code and a `reason` in plain words, e.g. *"
 |---|---|
 | API | Python, FastAPI, on Render (Frankfurt) |
 | Database | Supabase Postgres (Frankfurt) |
-| Payments | USDC on the Solana test network, through Solana Pay Kit (x402 / MPP) |
+| Payments | USDC on a Solana test network (the `localnet` sandbox as deployed, or devnet), through Solana Pay Kit (x402 / MPP) |
 | Web app | React + TypeScript, built with Lovable, in [`frontend/`](frontend/) |
-| Demo sellers | Two small paywalled services on Render ([`vendors/app.py`](vendors/app.py)) |
-| Tests | 110 automated tests, run on every push by GitHub Actions |
+| Demo sellers | One small paywalled seller app ([`vendors/app.py`](vendors/app.py)), run as two services on Render so News Wire is a separate seller |
+| Tests | 110 automated tests (SQLite and a mock payment rail), run on every push by GitHub Actions |
 
 ```
 app/            the API: rules (policy.py), purchase flow (service.py), response firewall (firewall.py),
@@ -113,7 +114,7 @@ render.yaml     the three Render services
 
 **Deploy:**
 1. **Supabase:** create a project in Frankfurt. Copy the **Session pooler** connection string, change `postgresql://` to `postgresql+psycopg://` and add `?sslmode=require`. That's `DATABASE_URL`.
-2. **Render:** **New → Blueprint**, pick this repo. It creates `agentbudget-api`, `agentbudget-vendors` and `agentbudget-newswire`, and generates `APP_SECRET` and `OPERATOR_TOKEN`.
+2. **Render:** **New → Blueprint**, pick this repo. It creates `agentbudget-api`, `agentbudget-vendors` and `agentbudget-newswire`, and generates `APP_SECRET` and `OPERATOR_TOKEN`. It also sets `RAIL=paykit`, `NETWORK=localnet` and `PUBLIC_DEMO=true`, so the dashboard is open until you change that.
 3. On **agentbudget-api → Environment**, set `DATABASE_URL`, `VENDOR_BASE` (vendors URL), `NEWS_VENDOR_BASE` (News Wire URL), `ALLOWED_ORIGINS` (the web app's URL) and `ALLOWED_ORIGIN_REGEX` (see [`.env.example`](.env.example)). No trailing slashes.
 4. Check `https://<api>/health`. If a setting is missing, the API refuses to start and its log lists what to fix.
 
@@ -127,7 +128,7 @@ render.yaml     the three Render services
 | GET | `/v1/demo/steps` | anyone | The tour's steps |
 | POST | `/v1/early-access` | anyone | Sign up (rate-limited) |
 | GET | `/v1/early-access/count` | anyone | Number of sign-ups |
-| POST | `/v1/agents/{agent_id}/call` | agent key | Buy: 200, 202 or 403 |
+| POST | `/v1/agents/{agent_id}/call` | agent key | Buy: 200, 202, 403 or 502 |
 | GET | `/v1/state` | operator | Agents, approvals, recent purchases |
 | POST | `/v1/approvals/{id}/approve`, `/deny` | operator | Decide a waiting purchase |
 | POST | `/v1/agents/{agent_id}/freeze`, `/unfreeze` | operator | Kill switch |
@@ -140,7 +141,7 @@ render.yaml     the three Render services
 | PATCH | `/v1/rules/agents/{agent_id}`, `/v1/rules/items/{tool}` | operator | Change or archive |
 | POST | `/v1/demo/run`, `/v1/demo/next`, `/v1/demo/stop` | operator | Guided tour |
 | GET | `/v1/demo` | operator | Tour progress |
-| POST | `/v1/playground/buy` | operator | "Be the agent" |
+| POST | `/v1/playground/buy` | operator | "Be the agent" (rate-limited) |
 | POST | `/v1/demo/reset` | operator | Reset the demo |
 | GET | `/v1/early-access`, `/v1/early-access.csv` | operator | Sign-ups |
 | DELETE | `/v1/early-access/{email}` | operator | Delete a sign-up |
@@ -166,12 +167,14 @@ render.yaml     the three Render services
 | `RPC_URL` | sandbox | Solana RPC |
 | `VENDOR_BASE` | `http://127.0.0.1:8001` | Demo sellers' URL |
 | `NEWS_VENDOR_BASE` | same as `VENDOR_BASE` | News Wire's URL (its own service, so a separate seller) |
-| `SANDBOX_AUTOFUND` | `true` | Top up test wallets to the daily budget at startup, before each demo and on Reset demo |
+| `SANDBOX_AUTOFUND` | `true` | On the `localnet` sandbox only: set each test wallet to its daily budget at startup, before each demo, on Reset demo and when an agent is added or changed |
 | `CATALOG_PATH` | `app/catalog.json` | Starting rules |
 | `EXPLORER_TX_URL` | automatic | Receipt link template |
 | `DEMO_ENABLED` | `true` | Guided tour |
 | `SELLER_REVIEW_AFTER` | `1` | Incidents before a seller goes under review |
 | `AGENT_KEYS`, `AGENT_WALLET_KEYS` | none | Optional overrides ([`scripts/generate_secrets.py`](scripts/generate_secrets.py)) |
+| `WALLETS_DIR` | `.wallets` | Folder with wallet key files, used if no wallet key is set |
+| `PAYWALL`, `VENDOR_NETWORK` | `on`, `solana_localnet` | On the sellers' services: `PAYWALL=off` makes them free (for the mock rail); `VENDOR_NETWORK` is `solana_localnet` or `solana_devnet` |
 
 </details>
 
@@ -181,14 +184,16 @@ render.yaml     the three Render services
 - **Secrets live in Render's environment**, never in the repo. Agents and the dashboard use separate keys.
 - **The browser never reaches the database.** Only the API does. Its tables are in their own schema, which Supabase's public API doesn't expose. Row-level security is on only if you create the tables with [`supabase/schema.sql`](supabase/schema.sql).
 - **The API won't start half-configured**, and the sign-up form and the playground are rate-limited.
-- **`PUBLIC_DEMO=true`** lets judges use the dashboard without a token. Agents still need their keys. Turn it off after judging.
+- **`PUBLIC_DEMO=true`** lets judges use the dashboard without a token. That includes stopping agents, changing rules, and reading, exporting and deleting the early-access sign-ups (email addresses). Agents still need their keys, and an agent's key is still shown only with the operator token. Turn it off after judging.
 
 ## Limits of this MVP
 
+- Built during the hackathon and tested for the demo flow, not for production use.
 - Test network only, with made-up seller data.
 - The server holds the agents' test keys, all derived from one secret. Not acceptable for real money. Next: the customer owns the wallet and the limits are enforced on Solana.
 - A slow loop (under the breaker's thresholds) is stopped only by the daily budget.
-- "The same purchase" is literal: an extra detail, such as `"page": 1`, makes it a new one.
+- "The same purchase" means the same item and parameters, ignoring key order, upper/lower case and extra spaces. An extra parameter, such as `"page": 1`, makes it a new one.
+- Reuse keeps the seller's answer in the database until its window ends. Expired answers are cleared the next time any answer is stored.
 - An agent that legitimately buys more than 30 times a minute trips the breaker. The limits aren't editable yet.
 - The firewall is a pattern list. It catches common phrasings, not every possible one. A flagged link appears in `content_flags`.
 - With Solana Pay Kit, an overpriced purchase is refused, but the message can't name the price the seller asked.
