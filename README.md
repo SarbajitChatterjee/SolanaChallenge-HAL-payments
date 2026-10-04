@@ -57,7 +57,7 @@ After a purchase is paid, HAL checks what came back:
 | Control | What happens | Where it is set |
 |---|---|---|
 | Response firewall | Before the agent sees the data, HAL checks every text in it. Text that gives instructions to an AI agent (a fixed list of 20 patterns), asks for a payment, or contains a link that isn't on the approved list is listed in `content_flags`. For items set to `redact` (in the demo: news), texts with instructions or payment requests are replaced. The payment itself is already made at this point; the firewall protects what the agent does next. | Per item in `catalog.json` (`annotate` by default, `redact` for news) |
-| Source of a trap | HAL remembers every link in a paid response. If an agent tries to buy one of those links within 24 hours and it is blocked, HAL names the seller and the purchase that sent it, and puts that seller under review. A stored result from that seller can still be reused, because no money moves. | Automatic. End a review with `POST /v1/sellers/{origin}/restore`. `SELLER_REVIEW_AFTER` sets how many incidents start a review (default 1). |
+| Source of a trap | HAL remembers every link in a paid response. If an agent tries to buy one of those links within 24 hours and it is blocked, HAL names the seller and the purchase that sent it, and puts that seller under review. A stored result from that seller can still be reused, because no money moves. | Automatic. End a review with `POST /v1/sellers/restore`. `SELLER_REVIEW_AFTER` sets how many incidents start a review (default 1). |
 | Receipts | Every payment is in the ledger with its Solana receipt. The CSV export also lists reused purchases at 0.00, with the payment whose result they reused. | — |
 
 **What the Rules page changes:** for agents, the description, allowed items, task budget, daily budget and approval limit; for items, the name, description, seller name, address and agreed price. Changes are checked (a task budget can't exceed the daily budget, prices must be above zero, ...), apply to the very next purchase, and are written to a change history. Agents and items are archived, never deleted, so the ledger keeps its meaning.
@@ -179,7 +179,8 @@ The web app is live at **[https://solana-hal-payments.lovable.app/](https://sola
 | PATCH | `/v1/rules/agents/{agent_id}`, `/v1/rules/items/{tool}` | operator | Change rules, or archive with `{"active": false}` |
 | GET | `/v1/rules/history` | operator | Who changed which rule, when, from what to what |
 | GET | `/v1/sellers` | operator | Every seller with its status (`active` or `under_review`) and number of incidents |
-| POST | `/v1/sellers/{origin}/restore` | operator | End a review. Recorded in the change history. |
+| POST | `/v1/sellers/restore` | operator | End a review, with `{"origin": "<seller_origin>"}` in the body. Recorded in the change history. |
+| POST | `/v1/sellers/{origin}/restore` | operator | The same, with the origin URL-encoded in the path. |
 | GET | `/v1/early-access`, `/v1/early-access.csv` | operator | Sign-ups |
 | GET | `/v1/agents/{agent_id}/key` | operator token only | An agent's key and wallet address, to connect a real agent |
 | DELETE | `/v1/early-access/{email}` | operator | Delete a sign-up on request |

@@ -270,6 +270,30 @@ def test_restoring_a_seller_ends_the_review(api):
     assert api.post("/v1/sellers/https://nobody.example/restore", headers=OP_H).status_code == 404
 
 
+def test_restoring_a_seller_by_body(api):
+    call(api, tool="news_search", params={"q": "Duping Bahn"})
+    call(api, url=DOSSIER)
+    assert api.post("/v1/sellers/restore", json={"origin": DEMO_SELLER}, headers=AGENT_H).status_code == 401
+    r = api.post("/v1/sellers/restore", json={"origin": DEMO_SELLER}, headers=OP_H)
+    assert r.status_code == 200 and r.json()["status"] == "active"
+    assert call(api, tool="fx_rate", params={"pair": "EURUSD"}).status_code == 200
+    history = api.get("/v1/rules/history", headers=OP_H).json()
+    assert history[0]["action"] == "seller.restored" and history[0]["target"] == DEMO_SELLER
+    assert api.post("/v1/sellers/restore", json={"origin": "https://nobody.example"},
+                    headers=OP_H).status_code == 404
+    assert api.post("/v1/sellers/restore", json={}, headers=OP_H).status_code == 422
+
+
+def test_restore_path_survives_encoding_and_a_collapsed_slash(api):
+    from urllib.parse import quote
+    call(api, tool="news_search", params={"q": "Duping Bahn"})
+    call(api, url=DOSSIER)
+    encoded = quote(DEMO_SELLER, safe="")                                    # http%3A%2F%2F127.0.0.1%3A8001
+    assert api.post(f"/v1/sellers/{encoded}/restore", headers=OP_H).json()["status"] == "active"
+    collapsed = DEMO_SELLER.replace("://", ":/")                             # what some proxies send
+    assert api.post(f"/v1/sellers/{collapsed}/restore", headers=OP_H).status_code == 200
+
+
 def test_an_unknown_link_without_a_source_is_only_blocked(api):
     r = call(api, url="https://dossier-deals.example/full-dossier")         # never seen in a paid response
     assert r.status_code == 403 and "caused_by" not in r.json()

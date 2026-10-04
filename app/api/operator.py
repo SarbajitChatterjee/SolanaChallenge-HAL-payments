@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,7 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..db import iso
 from ..ratelimit import limit
-from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, SellerView, StateView
+from ..schemas import DemoView, EarlyAccessView, PlaygroundIn, RestoreSellerIn, SellerView, StateView
 from ..security import actor_of, require_operator, require_operator_token
 from ..service import CallRequest
 
@@ -73,8 +74,7 @@ async def sellers(request: Request):
     return await asyncio.to_thread(request.app.state.service.sellers)
 
 
-@router.post("/sellers/{origin:path}/restore", response_model=SellerView)
-async def restore_seller(origin: str, request: Request):
+async def _restore(origin: str, request: Request) -> dict:
     """End a review: purchases from this seller are paid automatically again."""
     service = request.app.state.service
     origin = origin.rstrip("/").lower()
@@ -86,6 +86,20 @@ async def restore_seller(origin: str, request: Request):
     await asyncio.to_thread(request.app.state.repo.add_audit, actor=actor, action="seller.restored", target=origin,
                             details={"previous_status": known[origin]["status"]})
     return next(s for s in await asyncio.to_thread(service.sellers) if s["seller_origin"] == origin)
+
+
+# The origin goes in the body, so no proxy can change the "://" in it. Declared before the path route.
+@router.post("/sellers/restore", response_model=SellerView)
+async def restore_seller_by_body(body: RestoreSellerIn, request: Request):
+    return await _restore(body.origin, request)
+
+
+@router.post("/sellers/{origin:path}/restore", response_model=SellerView)
+async def restore_seller(origin: str, request: Request):
+
+    # A proxy that decodes %2F may merge "https://" into "https:/". Put the second slash back.
+    origin = re.sub(r"^(https?):/(?!/)", r"\1://", origin)
+    return await _restore(origin, request)
 
 
 @router.get("/ledger.csv", response_class=PlainTextResponse)
