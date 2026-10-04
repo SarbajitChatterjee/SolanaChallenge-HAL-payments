@@ -19,17 +19,17 @@ jobs:
           curl -s -o /dev/null https://solanachallenge-hal-payments.onrender.com/health || true
           curl -s -o /dev/null https://solana-hal-payments.lovable.app/ || true
 
-      - name: Wait 70 seconds for instances to spin up
-        run: sleep 70
+      - name: Wait 60 seconds for instances to spin up
+        run: sleep 60
 
       - name: Verify API Service (Alerts if not 200)
-        run: curl -fI https://agentbudget-api-n9y6.onrender.com/health
+        run: curl -fi https://agentbudget-api-n9y6.onrender.com/health
 
       - name: Verify Vendors Service (Alerts if not 200)
-        run: curl -fI https://agentbudget-vendors-n9y6.onrender.com/health
+        run: curl -fi https://agentbudget-vendors-n9y6.onrender.com/health
 
       - name: Verify Challenge App Service (Alerts if not 200)
-        run: curl -fI https://solanachallenge-hal-payments.onrender.com/health
+        run: curl -fi https://solanachallenge-hal-payments.onrender.com/health
 
       - name: Verify Frontend App (Alerts if not 200)
-        run: curl -fI https://solana-hal-payments.lovable.app/
+        run: curl -fi https://solana-hal-payments.lovable.app/
