@@ -42,6 +42,9 @@ class AgentView(BaseModel):
     daily_cap: str
     approval_above: str
     spent_today: str
+    saved_today: str                 # what reused purchases would have cost today
+    reused_today: int
+    frozen_reason: str | None        # why the agent is stopped: kill switch by hand, or the circuit breaker
     current_task: CurrentTask | None
     wallet_address: str | None
     wallet_usdc: str | None
@@ -76,6 +79,9 @@ class EventView(BaseModel):
     reason: str | None
     tx: str | None
     explorer_url: str | None
+    caused_by: str | None = None     # blocked link: the paid purchase whose response contained it
+    reused_from: str | None = None   # reused purchase: the paid purchase whose result was sent
+    content_flags: list[dict] = []   # what the response firewall found in this purchase's data
 
 
 class SellerView(BaseModel):

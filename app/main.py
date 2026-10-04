@@ -1,4 +1,4 @@
-"""AgentBudget API.
+"""HAL API (formerly AgentBudget).
 
     uvicorn app.main:create_app --factory --port 8000
 """
@@ -27,7 +27,7 @@ from .schemas import HealthView
 from .service import SpendService
 from .settings import Settings
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 log = logging.getLogger("agentbudget")
 
 
@@ -91,15 +91,15 @@ def create_app(settings: Settings | None = None, repo: Repository | None = None,
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await topup()
-        log.info("AgentBudget %s up: rail=%s network=%s db=%s", VERSION, rail.name,
+        log.info("HAL %s up: rail=%s network=%s db=%s", VERSION, rail.name,
                  getattr(rail, "network", None), "postgres" if repo.is_postgres else "sqlite")
         yield
         repo.engine.dispose()
 
-    app = FastAPI(title="AgentBudget API", version=VERSION, lifespan=lifespan,
-                  description="AgentBudget lets AI agents buy data per call in USDC on Solana, within rules a "
-                              "person sets: approved sellers, agreed prices, budgets, approval limits and a "
-                              "kill switch.")
+    app = FastAPI(title="HAL API", version=VERSION, lifespan=lifespan,
+                  description="HAL lets AI agents buy data per call in USDC on Solana, within rules a "
+                              "person sets: approved sellers, agreed prices, budgets, approval limits, a "
+                              "kill switch, purchase reuse, a circuit breaker and a response firewall.")
     app.state.settings = s
     app.state.rules = rules
     app.state.repo = repo

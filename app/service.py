@@ -211,8 +211,7 @@ class SpendService:
     def _trace_to_seller(self, tx, source: dict, message: str, common: dict) -> Outcome:
         """Record the blocked attempt with its cause, add a seller incident, and start a review if needed."""
         seller, vendor = source["seller_origin"], source["vendor"] or source["seller_origin"]
-        at = source["created_at"].strftime("%H:%M")
-        message += f" The link came from {vendor}, purchase {source['source_event_id'][:4]} at {at} UTC."
+        message += f" The link came from {vendor}, purchase {source['source_event_id'][:4]}."
         already = tx.seller_under_review(seller)
         event_id = new_id()
         tx.add_incident(seller, "injection", event_id)
@@ -238,9 +237,7 @@ class SpendService:
 
     def _reuse(self, tx, item: CatalogItem, stored: dict, common: dict) -> Outcome:
         """Answer with the stored result of an earlier purchase. Nothing is paid, and no budget is used."""
-        at = stored["created_at"].strftime("%H:%M")
-        message = (f"Reused the result of purchase {stored['id'][:4]} from {at} UTC. Nothing was paid "
-                   f"(saved {usd(item.price)} USD).")
+        message = f"Reused the result of purchase {stored['id'][:4]}. Nothing was paid (saved {usd(item.price)} USD)."
         common = {**common, "amount": Decimal("0"), "reason": message}
         tx.record(decision="allow", status="reused", reused_from_event_id=stored["id"], **common)
         return answer(200, "allow", "reused", Reason.REUSED.value, message, amount=usd(Decimal("0")),
@@ -307,6 +304,8 @@ class SpendService:
                 "daily_cap": usd(a.daily_cap),
                 "approval_above": usd(a.approval_above),
                 "spent_today": usd(self.repo.spent(a.agent_id, since=since)),
+                **self._saved(a.agent_id, since),
+                "frozen_reason": self.repo.frozen_reason(a.agent_id) if frozen.get(a.agent_id) else None,
                 "current_task": {"task_id": current[0], "spent": usd(current[1])} if current else None,
                 "wallet_address": self._wallet_address(a.agent_id),
                 "wallet_usdc": None,
@@ -322,9 +321,15 @@ class SpendService:
             "vendor": r["vendor"], "amount": money(r["amount_micros"]), "decision": r["decision"],
             "status": r["status"], "reason_code": r["reason_code"], "reason": r["reason"], "tx": r["tx"],
             "explorer_url": self.explorer_url(r["tx"]),
+            "caused_by": r["caused_by_event_id"], "reused_from": r["reused_from_event_id"],
+            "content_flags": json.loads(r["content_flags_json"] or "[]"),
         } for r in self.repo.recent_events()]
         return {"rail": self.rail.name, "network": getattr(self.rail, "network", None),
                 "agents": agents, "approvals": approvals, "events": events}
+
+    def _saved(self, agent_id: str, since) -> dict[str, Any]:
+        amount, count = self.repo.saved(agent_id, since=since)
+        return {"saved_today": usd(amount), "reused_today": count}
 
     def _wallet_address(self, agent_id: str) -> str | None:
         """Display only: a missing key must never take the dashboard down."""

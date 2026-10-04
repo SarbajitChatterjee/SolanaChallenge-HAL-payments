@@ -132,8 +132,17 @@ def test_ledger_export(api):
     call(api, tool="company_lookup")
     call(api, url="http://127.0.0.1:8001/shady/full-dossier")
     lines = api.get("/v1/ledger.csv", headers=OP_H).text.strip().splitlines()
-    assert lines[0] == "Date (UTC),Agent,Task,Item,Seller,Amount,Currency,Reference,Solana receipt"
+    assert lines[0] == "Date (UTC),Agent,Task,Item,Seller,Amount,Currency,Reference,Solana receipt,Status,Reused from"
     assert len(lines) == 2 and ",research-agent,t1,company_lookup,Registry Data (demo),0.05,USDC,AB-" in lines[1]
+    assert lines[1].endswith(",paid,")
+
+
+def test_ledger_lists_reused_purchases_with_their_source(api):
+    first = call(api, tool="fx_rate", params={"pair": "EURUSD"}).json()
+    again = call(api, task="t2", tool="fx_rate", params={"pair": "EURUSD"}).json()
+    paid, reused = api.get("/v1/ledger.csv", headers=OP_H).text.strip().splitlines()[1:]
+    assert paid.endswith(f",{first['tx']},paid,") and f",AB-{again['reused_from']}," in paid
+    assert ",0.00,USDC,AB-" in reused and reused.endswith(",,reused,AB-" + again["reused_from"])
 
 
 
@@ -388,3 +397,31 @@ def test_approval_request_shows_what_the_task_already_bought(api):
     assert held["reason"].endswith("Task check-1 already bought: Company record, Exchange rate (0.06 USD).")
     pending = api.get("/v1/state", headers=OP_H).json()["approvals"]
     assert any(a["reason"] == held["reason"] for a in pending)                 # the approval card shows it too
+
+
+# ---- what the dashboard needs to show the new controls --------------------------------------------------------
+def test_fingerprint_ignores_extra_spaces_inside_strings():
+    from app.fingerprint import fingerprint
+    assert fingerprint("news_search", {"q": "Duping  Bahn"}) == fingerprint("news_search", {"q": " duping bahn"})
+    assert fingerprint("news_search", {"q": "Duping Bahn", "page": 1}) != fingerprint("news_search", {"q": "Duping Bahn"})
+
+
+def test_state_shows_savings_and_why_an_agent_is_stopped(api):
+    call(api, tool="fx_rate", params={"pair": "EURUSD"})
+    for i in range(3):
+        call(api, task=f"r{i}", tool="fx_rate", params={"pair": "EURUSD"})
+    agent = research(api)
+    assert agent["saved_today"] == "0.03" and agent["reused_today"] == 3 and agent["frozen_reason"] is None
+    api.post("/v1/agents/research-agent/freeze", headers=OP_H)
+    assert research(api)["frozen_reason"].startswith("Kill switch on")
+
+
+def test_state_events_show_reuse_provenance_and_flags(api):
+    news = call(api, tool="news_search", params={"q": "Duping Bahn"}).json()
+    again = call(api, task="t2", tool="news_search", params={"q": "Duping Bahn"}).json()
+    call(api, url=DEMO_SELLER + "/shady/full-dossier")
+    events = api.get("/v1/state", headers=OP_H).json()["events"]
+    paid = next(e for e in events if e["status"] == "settled")
+    assert paid["id"] == again["reused_from"] and paid["content_flags"] == news["content_flags"] != []
+    assert next(e for e in events if e["status"] == "reused")["reused_from"] == paid["id"]
+    assert next(e for e in events if e["reason_code"] == "not_in_catalog")["caused_by"] == paid["id"]

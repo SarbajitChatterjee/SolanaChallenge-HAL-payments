@@ -1,4 +1,4 @@
-"""Spend rules. Pure functions, no I/O: this is AgentBudget's core.
+"""Spend rules. Pure functions, no I/O: this is HAL's core.
 
 Checks run in this order, cheapest and most absolute first:
   1. kill switch         -> deny
