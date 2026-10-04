@@ -100,7 +100,7 @@ def test_denied_approval(api):
 def test_price_pinning_releases_budget(api):
     r = call(api, tool="fx_realtime")
     assert r.status_code == 403 and r.json()["reason_code"] == "price_too_high"
-    assert r.json()["reason"] == "The seller asked for more than the agreed 0.01 USD, so nothing was paid."
+    assert r.json()["reason"] == "FX Feed (demo) asked 0.10 USD. The agreed price is 0.01 USD, so nothing was paid."
     assert research(api)["spent_today"] == "0.00"
 
 
@@ -375,3 +375,16 @@ def test_parallel_identical_calls_with_reuse_never_overspend(api):
                                              params={"name": "Duping Bahn GmbH"}).json()["reason_code"], range(24)))
     assert codes.count("paid") <= 2 and set(codes) <= {"paid", "reused", "repeat_purchase"}
     assert research(api)["spent_today"] == f"{0.05 * codes.count('paid'):.2f}"
+
+
+
+# ---- tour v2: context for the person who approves -------------------------------------------------------------
+def test_approval_request_shows_what_the_task_already_bought(api):
+    assert call(api, task="new-task", tool="credit_report").json()["reason"].endswith(
+        "This task has bought nothing yet.")
+    call(api, task="check-1", tool="company_lookup", params={"name": "Duping Bahn GmbH"})
+    call(api, task="check-1", tool="fx_rate", params={"pair": "EURUSD"})
+    held = call(api, task="check-1", tool="credit_report").json()
+    assert held["reason"].endswith("Task check-1 already bought: Company record, Exchange rate (0.06 USD).")
+    pending = api.get("/v1/state", headers=OP_H).json()["approvals"]
+    assert any(a["reason"] == held["reason"] for a in pending)                 # the approval card shows it too

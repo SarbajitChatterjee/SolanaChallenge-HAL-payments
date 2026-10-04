@@ -80,7 +80,11 @@ class SpendService:
                                                    params=req.params)
         except PriceRejected as exc:
             log.info("price rejected for %s/%s: %s", agent_id, item.tool, exc)
-            message = (f"The seller asked for more than the agreed {usd(item.price)} USD, so nothing was paid.")
+            if exc.quoted is not None:
+                message = (f"{item.vendor} asked {usd(exc.quoted)} USD. The agreed price is {usd(item.price)} USD, "
+                           f"so nothing was paid.")
+            else:
+                message = f"The seller asked for more than the agreed {usd(item.price)} USD, so nothing was paid."
             await asyncio.to_thread(self.repo.finish_event, decided.event_id, status="blocked", decision="deny",
                                     reason=message, reason_code="price_too_high")
             return answer(403, "deny", "blocked", "price_too_high", message)
@@ -190,10 +194,12 @@ class SpendService:
                 return self._reuse(tx, item, stored, common)
 
             if verdict.decision is Decision.HOLD:
+                message = verdict.message + self._task_so_far(tx, req.task_id)
+                common = {**common, "reason": message}
                 approval_id = tx.create_approval(task_id=req.task_id, tool=item.tool, vendor=item.vendor,
-                                                 amount=item.price, reason=verdict.message)
+                                                 amount=item.price, reason=message)
                 tx.record(decision="hold", status="held", event_id=approval_id, **common)  # same id: decision updates it
-                return answer(202, "hold", "pending", verdict.code.value, verdict.message, approval_id=approval_id,
+                return answer(202, "hold", "pending", verdict.code.value, message, approval_id=approval_id,
                               amount=usd(item.price), item_name=item.name or item.tool)
 
             if approved and not tx.use_approval(req.approval_id):
@@ -220,6 +226,15 @@ class SpendService:
                   caused_by_event_id=source["source_event_id"], **common)
         return answer(403, "deny", "blocked", Reason.NOT_IN_CATALOG.value, message,
                       caused_by=source["source_event_id"], caused_by_seller=vendor)
+
+    def _task_so_far(self, tx, task_id: str) -> str:
+        """Context for the person who approves: what this task already bought."""
+        bought = tx.task_purchases(task_id)
+        if not bought:
+            return " This task has bought nothing yet."
+        names = ", ".join(self._name(tool) or tool for tool, _ in bought)
+        total = sum((amount for _, amount in bought), Decimal("0"))
+        return f" Task {task_id} already bought: {names} ({usd(total)} USD)."
 
     def _reuse(self, tx, item: CatalogItem, stored: dict, common: dict) -> Outcome:
         """Answer with the stored result of an earlier purchase. Nothing is paid, and no budget is used."""
