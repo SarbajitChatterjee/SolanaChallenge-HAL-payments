@@ -27,6 +27,10 @@ class PlaygroundIn(BaseModel):
     approval_id: str | None = Field(default=None, max_length=24)
 
 
+class RestoreSellerIn(BaseModel):
+    origin: str = Field(min_length=1, max_length=2048)   # the seller key, scheme://host, as in GET /v1/sellers
+
+
 # ---- dashboard ----------------------------------------------------------------
 class CurrentTask(BaseModel):
     task_id: str
