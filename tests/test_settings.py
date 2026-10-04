@@ -1,8 +1,12 @@
 """Startup rules: one random APP_SECRET is enough, and missing or unsafe settings stop the API with a clear list."""
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, inspect, text
 
+from app.db import PG_SCHEMA, Repository
 from app.main import create_app
 from app.rails import MockRail, PayKitRail
 from app.settings import Settings
@@ -55,6 +59,7 @@ def test_mock_payments_need_no_wallets_or_seller_address():
 
 
 def test_derived_keys_are_stable_distinct_and_load_as_wallets():
+    pytest.importorskip("solana_pay_kit")  # wallet keys need the Solana SDK
     a, b = Settings(_env_file=None, **RENDER), Settings(_env_file=None, **RENDER)
     for agent in AGENTS:                                                 # same after a redeploy
         assert a.agent_key_for(agent) == b.agent_key_for(agent) and a.wallet_key_for(agent) == b.wallet_key_for(agent)
@@ -87,3 +92,103 @@ def test_key_endpoint_needs_the_real_token_even_in_public_demo(tmp_path):
         r = api.post("/v1/agents/research-agent/call", json={"task_id": "t", "tool": "nope"},
                      headers={"Authorization": f"Bearer {body['agent_key']}"})
         assert r.status_code == 403 and r.json()["reason_code"] == "not_in_catalog"  # key works, rules apply
+
+# ---- database upgrade at startup (feat/7.1) -------------------------------------------------------------
+NEW_TABLES = {"event_details", "purchase_payloads", "content_links", "seller_status", "seller_incidents", "claims"}
+NEW_AGENT_COLUMNS = {"max_repeats": 2, "repeat_window_minutes": 60, "max_attempts_per_min": 30,
+                     "velocity_share_10m": 0.2}
+NEW_ITEM_COLUMNS = {"reuse_ttl_seconds": 0, "reuse_scope": "agent", "content_policy": "annotate", "expect_json": None}
+
+# The agents and catalog_items tables exactly as the main branch creates them.
+MAIN_TABLES = """
+create table {p}agents (agent_id varchar(64) primary key, description text, allowed_tools text not null,
+  per_task_cap_micros bigint not null, daily_cap_micros bigint not null, approval_above_micros bigint not null,
+  active boolean not null, created_at timestamp not null, updated_at timestamp not null);
+create table {p}catalog_items (tool varchar(64) primary key, name varchar(80) not null, description text,
+  vendor varchar(128) not null, url text not null, price_micros bigint not null, active boolean not null,
+  created_at timestamp not null, updated_at timestamp not null);
+insert into {p}agents values ('research-agent', 'Checks suppliers', '["fx_rate"]', 750000, 25000000, 250000, true,
+  '2026-10-01 00:00:00', '2026-10-01 00:00:00');
+insert into {p}catalog_items values ('fx_rate', 'Exchange rate', '', 'FX Feed (demo)', '{{vendor_base}}/v1/fx', 10000,
+  true, '2026-10-01 00:00:00', '2026-10-01 00:00:00')
+"""
+
+
+@pytest.fixture(params=["sqlite"] + (["postgres"] if os.getenv("TEST_POSTGRES_URL") else []))
+def blank_db(request, tmp_path):
+    """(database url, table prefix) for an empty database."""
+    if request.param == "postgres":
+        url = os.environ["TEST_POSTGRES_URL"]
+        with create_engine(url).begin() as conn:
+            conn.execute(text(f"DROP SCHEMA IF EXISTS {PG_SCHEMA} CASCADE"))
+        return url, f"{PG_SCHEMA}."
+    return f"sqlite:///{tmp_path / 'upgrade.db'}", ""
+
+
+def _columns(url, table):
+    schema = PG_SCHEMA if url.startswith("postgresql") else None
+    return {c["name"] for c in inspect(create_engine(url)).get_columns(table, schema=schema)}
+
+
+def test_app_starts_on_an_empty_database(blank_db):
+    url, _ = blank_db
+    settings = Settings(_env_file=None, database_url=url, public_demo=True, app_secret="s")
+    with TestClient(create_app(settings, rail=MockRail())) as api:
+        assert api.get("/v1/status").status_code == 200
+    schema = PG_SCHEMA if url.startswith("postgresql") else None
+    assert NEW_TABLES <= set(inspect(create_engine(url)).get_table_names(schema=schema))
+    assert set(NEW_AGENT_COLUMNS) <= _columns(url, "agents")
+    assert set(NEW_ITEM_COLUMNS) <= _columns(url, "catalog_items")
+
+
+def test_app_upgrades_a_database_from_main(blank_db):
+    url, prefix = blank_db
+    with create_engine(url).begin() as conn:
+        if prefix:
+            conn.execute(text(f"create schema {PG_SCHEMA}"))
+        for statement in MAIN_TABLES.format(p=prefix).split(";"):
+            conn.execute(text(statement))
+    settings = Settings(_env_file=None, database_url=url, public_demo=True, app_secret="s")
+    with TestClient(create_app(settings, rail=MockRail())) as api:       # startup adds the columns
+        assert api.get("/v1/rules").json()["agents"][0]["agent_id"] == "research-agent"  # old rows still work
+    with create_engine(url).connect() as conn:                           # old rows got the defaults
+        agent = conn.execute(text(f"select * from {prefix}agents")).mappings().one()
+        item = conn.execute(text(f"select * from {prefix}catalog_items")).mappings().one()
+    assert {k: agent[k] for k in NEW_AGENT_COLUMNS} == NEW_AGENT_COLUMNS
+    assert {k: item[k] for k in NEW_ITEM_COLUMNS} == NEW_ITEM_COLUMNS
+    assert Repository(url).add_missing_columns() == []                   # a second start changes nothing
+
+
+
+# ---- seller addresses and the wake-up (News Wire on its own service) ----------------------------------------------
+def test_news_wire_falls_back_to_the_main_seller_service():
+    from app.catalog import load_catalog
+    alone = Settings(_env_file=None, vendor_base="https://sellers.example")
+    split = Settings(_env_file=None, vendor_base="https://sellers.example", news_vendor_base="https://news.example/")
+    assert load_catalog(None, alone.seller_bases).items["news_search"].url == "https://sellers.example/v1/news"
+    assert load_catalog(None, split.seller_bases).items["news_search"].url == "https://news.example/v1/news"
+    assert load_catalog(None, split.seller_bases).items["fx_rate"].url == "https://sellers.example/v1/fx"
+
+
+def test_news_wire_address_must_be_public_for_real_payments():
+    assert "NEWS_VENDOR_BASE points to this machine" in problems(news_vendor_base="http://localhost:8002")
+    assert problems(news_vendor_base="https://agentbudget-newswire.onrender.com") == ""
+
+
+def test_waker_pings_each_seller_service_at_most_every_5_minutes():
+    import asyncio
+    from app.main import SellerWaker
+    waker = SellerWaker(["https://a.example", "https://b.example/", "http://127.0.0.1:8001", "https://a.example"])
+    assert waker.urls == ["https://a.example/health", "https://b.example/health"]   # no local, no duplicates
+    pinged = []
+
+    async def fake_ping(client, url):
+        pinged.append(url)
+
+    waker.ping = fake_ping
+    asyncio.run(waker.wake())
+    asyncio.run(waker.wake())                                                      # within 5 minutes: skipped
+    assert pinged == ["https://a.example/health", "https://b.example/health"]
+    waker.last -= 301
+    asyncio.run(waker.wake())
+    assert len(pinged) == 4

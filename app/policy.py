@@ -1,11 +1,18 @@
-"""Spend rules. Pure functions, no I/O: this is AgentBudget's core.
+"""Spend rules. Pure functions, no I/O: this is HAL's core.
 
 Checks run in this order, cheapest and most absolute first:
   1. kill switch         -> deny
-  2. approved list       -> deny  (unknown seller, or item this agent may not buy)
-  3. budgets             -> deny  (per task and per day, money already reserved included)
-  4. approval limit      -> hold  (a person decides)
+  2. circuit breaker     -> deny, and the caller freezes the agent (too many attempts, or spending too fast)
+  3. approved list       -> deny  (unknown seller, or item this agent may not buy)
+  3b. reuse              -> allow, nothing paid (a stored result of the same purchase is still valid)
+  4. repeat rule         -> deny  (the same purchase was already paid too often)
+  5. budgets             -> deny  (per task and per day, money already reserved included)
+  6. seller under review -> hold  (the seller sent a trap; a person decides)
+  7. approval limit      -> hold  (a person decides)
 Whatever passes is allowed.
+
+The breaker comes before the other checks so that a loop of blocked attempts also trips it.
+Its threshold (30 attempts a minute) is far above the repeat limit, so a loop shows "repeat" first.
 
 Every verdict carries a stable `code` for software and a plain `message` for people.
 """
@@ -32,6 +39,10 @@ class Reason(str, Enum):
     TASK_BUDGET = "task_budget"
     DAILY_BUDGET = "daily_budget"
     NEEDS_APPROVAL = "needs_approval"
+    REPEAT_PURCHASE = "repeat_purchase"
+    CIRCUIT_BREAKER = "circuit_breaker"
+    SELLER_UNDER_REVIEW = "seller_under_review"
+    REUSED = "reused"
 
 
 @dataclass(frozen=True)
@@ -42,6 +53,9 @@ class CatalogItem:
     vendor: str
     name: str = ""          # human name, e.g. "Company record"
     description: str = ""
+    content_policy: str = "annotate"   # response firewall: annotate | redact
+    reuse_ttl_seconds: int = 0         # purchase reuse: 0 = never reuse (the default until the seller terms allow it)
+    reuse_scope: str = "agent"         # agent | org: who may get a stored result
 
 
 @dataclass(frozen=True)
@@ -52,6 +66,10 @@ class AgentPolicy:
     daily_cap: Decimal
     approval_above: Decimal
     description: str = ""
+    max_repeats: int = 2                 # the same purchase is paid at most this often...
+    repeat_window_minutes: int = 60      # ...within this window
+    max_attempts_per_min: int = 30       # breaker: more attempts than this in one minute
+    velocity_share_10m: float = 0.2      # breaker: more than this share of the daily cap spent in 10 minutes
 
 
 @dataclass(frozen=True)
@@ -79,6 +97,12 @@ def _normalize(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/").lower()
 
 
+def origin(url: str) -> str:
+    """The seller key: scheme://host[:port]. Two items from one origin are one seller."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
 def resolve(req: SpendRequest, catalog: dict[str, CatalogItem]) -> CatalogItem | None:
     """Map a request to an approved item. Raw URLs must match an approved URL exactly."""
     if req.tool:
@@ -98,9 +122,23 @@ def evaluate(
     spent_today: Decimal,
     frozen: bool,
     approved: bool = False,
+    repeat_count: int = 0,
+    attempts_last_min: int = 0,
+    spent_last_10m: Decimal = Decimal("0"),
+    seller_under_review: bool = False,
+    reusable: bool = False,
 ) -> Verdict:
     if frozen:
         return Verdict(Decision.DENY, Reason.FROZEN, "This agent is stopped. Someone flipped the kill switch.")
+
+    if attempts_last_min >= policy.max_attempts_per_min:
+        return Verdict(Decision.DENY, Reason.CIRCUIT_BREAKER,
+                       f"Stopped automatically: {attempts_last_min + 1} purchase attempts in 60 seconds.")
+    velocity_limit = policy.daily_cap * Decimal(str(policy.velocity_share_10m))
+    if spent_last_10m > velocity_limit:
+        return Verdict(Decision.DENY, Reason.CIRCUIT_BREAKER,
+                       f"Stopped automatically: {usd(spent_last_10m)} USD spent in 10 minutes, more than "
+                       f"{policy.velocity_share_10m:.0%} of the daily budget.")
 
     item = resolve(req, catalog)
     if item is None:
@@ -111,6 +149,16 @@ def evaluate(
     if item.tool not in policy.allowed_tools:
         return Verdict(Decision.DENY, Reason.NOT_ALLOWED,
                        f"{policy.agent_id} isn't allowed to buy {label}.", item)
+
+    # Reuse comes before the repeat rule: a loop that can get the stored result is never blocked as a repeat.
+    if reusable:
+        return Verdict(Decision.ALLOW, Reason.REUSED, "HAL already bought this. It sent the stored result, "
+                                                      "so nothing was paid.", item)
+
+    if repeat_count >= policy.max_repeats:
+        return Verdict(Decision.DENY, Reason.REPEAT_PURCHASE,
+                       f"This exact purchase was already paid {repeat_count} times in the last "
+                       f"{policy.repeat_window_minutes} minutes.", item)
 
     if spent_task + item.price > policy.per_task_cap:
         return Verdict(Decision.DENY, Reason.TASK_BUDGET,
@@ -123,6 +171,11 @@ def evaluate(
                        f"already used.", item)
 
     # Budgets come first on purpose: never ask a person to approve what the budget forbids anyway.
+    if seller_under_review and not approved:
+        return Verdict(Decision.HOLD, Reason.SELLER_UNDER_REVIEW,
+                       f"{item.vendor} is under review because it sent a link an agent was told to buy. "
+                       f"A person has to approve purchases from it.", item)
+
     if item.price > policy.approval_above and not approved:
         return Verdict(Decision.HOLD, Reason.NEEDS_APPROVAL,
                        f"{usd(item.price)} USD is above the {usd(policy.approval_above)} USD limit for automatic "

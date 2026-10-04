@@ -56,13 +56,21 @@ class Settings(BaseSettings):
     # Rules and sellers
     catalog_path: str | None = None             # starting rules; the live rules are in the database
     vendor_base: str = "http://127.0.0.1:8001"
+    news_vendor_base: str | None = None         # News Wire on its own service, so it is a separate seller | Only for Demo related purposes, dummy new origin in Render
     explorer_tx_url: str | None = None          # e.g. "https://explorer.solana.com/tx/{tx}?cluster=devnet"
 
     demo_enabled: bool = True
+    seller_review_after: int = 1                # incidents before a seller goes under review
 
     @cached_property
     def origins(self) -> list[str]:
         return [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
+
+    # Only for demo purposes, dummy new origin in Render
+    @property
+    def seller_bases(self) -> dict[str, str]:
+        """Placeholders in catalog URLs. News Wire falls back to VENDOR_BASE when NEWS_VENDOR_BASE is not set."""
+        return {"vendor_base": self.vendor_base, "news_base": self.news_vendor_base or self.vendor_base}
 
     @property
     def is_postgres(self) -> bool:
@@ -112,6 +120,11 @@ class Settings(BaseSettings):
             if any(host in self.vendor_base for host in ("127.0.0.1", "localhost")):
                 problems.append("VENDOR_BASE still points to this machine. Set it to the sellers' public URL, "
                                 "e.g. https://agentbudget-vendors.onrender.com")
+            
+            # Only for demo purposes, dummy new origin in Render
+            if self.news_vendor_base and any(h in self.news_vendor_base for h in ("127.0.0.1", "localhost")):
+                problems.append("NEWS_VENDOR_BASE points to this machine. Set it to the News Wire service's public "
+                                "URL, e.g. https://agentbudget-newswire.onrender.com")
         if "*" in self.origins:
             problems.append("ALLOWED_ORIGINS must list exact web addresses, not '*'.")
         if problems:

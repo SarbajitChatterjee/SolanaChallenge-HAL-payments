@@ -1,2 +1,3 @@
 pytest>=8
 anthropic>=0.40
+solders>=0.26

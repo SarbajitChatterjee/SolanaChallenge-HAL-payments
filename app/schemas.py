@@ -27,6 +27,10 @@ class PlaygroundIn(BaseModel):
     approval_id: str | None = Field(default=None, max_length=24)
 
 
+class RestoreSellerIn(BaseModel):
+    origin: str = Field(min_length=1, max_length=2048)   # the seller key, scheme://host, as in GET /v1/sellers
+
+
 # ---- dashboard ----------------------------------------------------------------
 class CurrentTask(BaseModel):
     task_id: str
@@ -42,6 +46,9 @@ class AgentView(BaseModel):
     daily_cap: str
     approval_above: str
     spent_today: str
+    saved_today: str                 # what reused purchases would have cost today
+    reused_today: int
+    frozen_reason: str | None        # why the agent is stopped: kill switch by hand, or the circuit breaker
     current_task: CurrentTask | None
     wallet_address: str | None
     wallet_usdc: str | None
@@ -71,11 +78,23 @@ class EventView(BaseModel):
     vendor: str | None
     amount: str | None
     decision: Literal["allow", "hold", "deny"]
-    status: Literal["reserved", "settled", "held", "approved", "denied", "blocked", "failed", "control"]
+    status: Literal["reserved", "settled", "reused", "held", "approved", "denied", "blocked", "failed", "control"]
     reason_code: str | None
     reason: str | None
     tx: str | None
     explorer_url: str | None
+    caused_by: str | None = None     # blocked link: the paid purchase whose response contained it
+    reused_from: str | None = None   # reused purchase: the paid purchase whose result was sent
+    content_flags: list[dict] = []   # what the response firewall found in this purchase's data
+
+
+class SellerView(BaseModel):
+    seller_origin: str               # scheme://host, the seller key
+    vendors: list[str]               # display names of the items from this origin
+    status: Literal["active", "under_review"]
+    incidents: int
+    updated_at: str | None
+    updated_by: str | None           # "HAL" for an automatic review, else the operator
 
 
 class StateView(BaseModel):

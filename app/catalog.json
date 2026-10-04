@@ -1,8 +1,9 @@
 {
-  "_comment": "Prices are agreed prices in USD. The API never signs a payment above them. {vendor_base} is replaced from VENDOR_BASE.",
+  "_comment": "Prices are agreed prices in USD. The API never signs a payment above them. {vendor_base} is replaced from VENDOR_BASE. reuse_ttl_seconds: how long HAL may send a stored result instead of paying again (0 or missing = never).",
   "catalog": [
     {
       "tool": "company_lookup",
+      "reuse_ttl_seconds": 604800,
       "url": "{vendor_base}/v1/company",
       "price": "0.05",
       "vendor": "Registry Data (demo)",
@@ -11,6 +12,7 @@
     },
     {
       "tool": "fx_rate",
+      "reuse_ttl_seconds": 3600,
       "url": "{vendor_base}/v1/fx",
       "price": "0.01",
       "vendor": "FX Feed (demo)",
@@ -19,7 +21,9 @@
     },
     {
       "tool": "news_search",
-      "url": "{vendor_base}/v1/news",
+      "reuse_ttl_seconds": 900,
+      "url": "{news_base}/v1/news",
+      "content_policy": "redact",
       "price": "0.05",
       "vendor": "News Wire (demo)",
       "name": "News search",

@@ -13,20 +13,25 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Iterator
 
-from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Index, MetaData, String, Table, Text,
-                        create_engine, delete, func, insert, select, text, update)
+from sqlalchemy import (BigInteger, Boolean, Column, DateTime, Float, Index, Integer, MetaData, String, Table, Text,
+                        create_engine, delete, func, insert, inspect, select, text, update)
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import CreateColumn
+
+log = logging.getLogger("agentbudget.db")
 
 PG_SCHEMA = "agentbudget"
 MICRO = Decimal(10**6)
-COUNTED = ("reserved", "settled")  # statuses that consume budget
+COUNTED = ("reserved", "settled")  # statuses that consume budget ("reused" never does)
+MAX_PAYLOAD_BYTES = 256 * 1024
 
 metadata = MetaData()
 
@@ -90,6 +95,12 @@ agents = Table(
     Column("active", Boolean, nullable=False, default=True),  # archived agents keep their history
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+
+    # Loop protection (feat/1.2). server_default fills existing rows when the column is added.
+    Column("max_repeats", Integer, nullable=False, server_default=text("2")),
+    Column("repeat_window_minutes", Integer, nullable=False, server_default=text("60")),
+    Column("max_attempts_per_min", Integer, nullable=False, server_default=text("30")),
+    Column("velocity_share_10m", Float, nullable=False, server_default=text("0.2")),
 )
 
 catalog_items = Table(
@@ -98,11 +109,17 @@ catalog_items = Table(
     Column("name", String(80), nullable=False),
     Column("description", Text),
     Column("vendor", String(128), nullable=False),
-    Column("url", Text, nullable=False),                      # may contain {vendor_base}
+    Column("url", Text, nullable=False),                      # may contain {vendor_base} or {news_base}
     Column("price_micros", BigInteger, nullable=False),
     Column("active", Boolean, nullable=False, default=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+
+    # Response firewall and reuse (feat/2.1, feat/2.3). 0 seconds = no reuse.
+    Column("reuse_ttl_seconds", Integer, nullable=False, server_default=text("0")),
+    Column("reuse_scope", String(8), nullable=False, server_default=text("'agent'")),      # agent | org
+    Column("content_policy", String(16), nullable=False, server_default=text("'annotate'")),  # annotate | redact | hold
+    Column("expect_json", Text),                                                           # delivery check (feat/2.4)
 )
 
 audit_log = Table(
@@ -114,6 +131,74 @@ audit_log = Table(
     Column("target", String(128)),
     Column("details", Text),                                  # JSON: {"field": [old, new], ...}
 )
+
+# ---- purchase firewall (feat/1.2 to feat/2.5) ----------------------------------------------------
+# A seller is identified by its origin (scheme://host), never by its display name.
+
+event_details = Table(  # one row for each purchase event, written when the purchase finishes
+    "event_details", metadata,
+    Column("event_id", String(24), primary_key=True),
+    Column("agent_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("fingerprint", String(64)),               # SHA-256 of tool + canonical params
+    Column("params_json", Text),
+    Column("quoted_price_micros", BigInteger),       # what the seller asked, also when HAL refused it
+    Column("caused_by_event_id", String(24)),        # the purchase whose content led to this request
+    Column("reused_from_event_id", String(24)),
+    Column("content_flags_json", Text),
+    Column("delivery_status", String(24)),
+    Column("match_status", String(24)),
+)
+Index("ix_event_details_fingerprint", event_details.c.agent_id, event_details.c.fingerprint,
+      event_details.c.created_at)
+
+purchase_payloads = Table(  # stored only for items with reuse, max 256 KB, deleted at expiry
+    "purchase_payloads", metadata,
+    Column("event_id", String(24), primary_key=True),
+    Column("body_json", Text, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+)
+
+content_links = Table(  # every URL found in a paid response
+    "content_links", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("url_normalized", Text, nullable=False),
+    Column("source_event_id", String(24), nullable=False),
+    Column("seller_origin", String(256), nullable=False),
+    Column("agent_id", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_content_links_url", content_links.c.url_normalized)
+
+seller_status = Table(
+    "seller_status", metadata,
+    Column("seller_origin", String(256), primary_key=True),
+    Column("status", String(16), nullable=False, server_default=text("'active'")),  # active | under_review
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("updated_by", String(32)),
+)
+
+seller_incidents = Table(
+    "seller_incidents", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("seller_origin", String(256), nullable=False),
+    Column("kind", String(16), nullable=False),      # injection | delivery | overquote
+    Column("event_id", String(24)),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_seller_incidents_origin", seller_incidents.c.seller_origin)
+
+claims = Table(  # x402 has no chargebacks; a claim is our record of a bad delivery
+    "claims", metadata,
+    Column("id", String(24), primary_key=True),
+    Column("event_id", String(24), nullable=False),
+    Column("seller_origin", String(256), nullable=False),
+    Column("amount_micros", BigInteger, nullable=False),
+    Column("status", String(16), nullable=False, server_default=text("'open'")),
+    Column("evidence_json", Text),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -168,13 +253,95 @@ class AgentTx:
 
     def record(self, *, task_id: str, decision: str, status: str, reason: str, reason_code: str,
                tool: str | None = None, url: str | None = None, vendor: str | None = None,
-               amount: Decimal | None = None, event_id: str | None = None) -> str:
+               amount: Decimal | None = None, event_id: str | None = None, fingerprint: str | None = None,
+               params_json: str | None = None, caused_by_event_id: str | None = None,
+               reused_from_event_id: str | None = None) -> str:
         event_id = event_id or new_id()
+        now = utcnow()
         self.conn.execute(insert(events).values(
-            id=event_id, created_at=utcnow(), agent_id=self.agent_id, task_id=task_id, tool=tool, url=url,
+            id=event_id, created_at=now, agent_id=self.agent_id, task_id=task_id, tool=tool, url=url,
             vendor=vendor, amount_micros=to_micros(amount), decision=decision, status=status, reason=reason,
             reason_code=reason_code))
+        if fingerprint is not None:
+            self.conn.execute(insert(event_details).values(event_id=event_id, agent_id=self.agent_id, created_at=now,
+                                                           fingerprint=fingerprint, params_json=params_json,
+                                                           caused_by_event_id=caused_by_event_id,
+                                                           reused_from_event_id=reused_from_event_id))
         return event_id
+
+    # ---- loop protection (repeat rule and circuit breaker) ----
+    def unfrozen_at(self) -> datetime | None:
+        """When a person last switched this agent back on. Attempts before that don't count again."""
+        at = self.conn.execute(select(func.max(events.c.created_at)).where(
+            events.c.agent_id == self.agent_id, events.c.status == "control",
+            events.c.reason_code == "kill_switch_off")).scalar()
+        return at if at is None or at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+    def count_attempts_since(self, since: datetime) -> int:
+        """Every purchase attempt, also blocked ones. Polls with an approval_id never create a row."""
+        return int(self.conn.execute(select(func.count()).select_from(events).where(
+            events.c.agent_id == self.agent_id, events.c.status != "control",
+            events.c.created_at >= since)).scalar_one())
+
+    def count_fingerprint_since(self, fingerprint: str, since: datetime) -> int:
+        """Paid (or currently paying) purchases with this fingerprint."""
+        return int(self.conn.execute(
+            select(func.count()).select_from(event_details.join(events, events.c.id == event_details.c.event_id))
+            .where(event_details.c.agent_id == self.agent_id, event_details.c.fingerprint == fingerprint,
+                   event_details.c.created_at >= since, events.c.status.in_(COUNTED))).scalar_one())
+
+    def task_purchases(self, task_id: str) -> list[tuple[str, Decimal]]:
+        """Paid purchases of one task, oldest first: (tool, amount)."""
+        rows = self.conn.execute(select(events.c.tool, events.c.amount_micros).where(
+            events.c.agent_id == self.agent_id, events.c.task_id == task_id, events.c.status == "settled")
+            .order_by(events.c.created_at)).all()
+        return [(r.tool, from_micros(r.amount_micros)) for r in rows]
+
+    # ---- purchase reuse ----
+    def find_reusable(self, fingerprint: str, *, org_wide: bool) -> dict | None:
+        """The newest settled purchase with this fingerprint whose stored result has not expired."""
+        q = (select(events.c.id, events.c.tx, events.c.created_at, purchase_payloads.c.body_json,
+                    event_details.c.content_flags_json)
+             .select_from(event_details.join(events, events.c.id == event_details.c.event_id)
+                          .join(purchase_payloads, purchase_payloads.c.event_id == events.c.id))
+             .where(event_details.c.fingerprint == fingerprint, events.c.status == "settled",
+                    purchase_payloads.c.expires_at > utcnow())
+             .order_by(events.c.created_at.desc()).limit(1))
+        if not org_wide:
+            q = q.where(event_details.c.agent_id == self.agent_id)
+        row = self.conn.execute(q).mappings().first()
+        return dict(row) if row else None
+
+    # ---- provenance: where a link came from, and sellers under review ----
+    def lookup_link(self, url_normalized: str, since: datetime) -> dict | None:
+        """The most recent paid response that contained this link, with the seller that sent it."""
+        row = self.conn.execute(
+            select(content_links.c.source_event_id, content_links.c.seller_origin, content_links.c.created_at,
+                   events.c.vendor)
+            .select_from(content_links.join(events, events.c.id == content_links.c.source_event_id))
+            .where(content_links.c.url_normalized == url_normalized, content_links.c.created_at >= since)
+            .order_by(content_links.c.created_at.desc()).limit(1)).mappings().first()
+        return dict(row) if row else None
+
+    def seller_under_review(self, origin: str) -> bool:
+        return self.conn.execute(select(seller_status.c.status).where(
+            seller_status.c.seller_origin == origin)).scalar() == "under_review"
+
+    def count_incidents(self, origin: str) -> int:
+        return int(self.conn.execute(select(func.count()).select_from(seller_incidents).where(
+            seller_incidents.c.seller_origin == origin)).scalar_one())
+
+    def add_incident(self, origin: str, kind: str, event_id: str) -> None:
+        self.conn.execute(insert(seller_incidents).values(id=new_id(), seller_origin=origin, kind=kind,
+                                                          event_id=event_id, created_at=utcnow()))
+
+    def set_seller_status(self, origin: str, status: str, by: str) -> None:
+        _set_seller_status(self.conn, origin, status, by)
+
+    def freeze(self, reason: str) -> None:
+        """The circuit breaker trips: same effect as the kill switch, in the same transaction."""
+        self.conn.execute(update(agent_state).where(agent_state.c.agent_id == self.agent_id).values(frozen=True))
+        self.record(task_id="-", decision="deny", status="control", reason=reason, reason_code="circuit_breaker")
 
     def get_approval(self, approval_id: str) -> dict | None:
         row = self.conn.execute(select(approvals).where(approvals.c.id == approval_id)).mappings().first()
@@ -198,6 +365,12 @@ def _transition(conn: Connection, approval_id: str, from_status: str, to_status:
     return res.rowcount == 1
 
 
+def _set_seller_status(conn: Connection, origin: str, status: str, by: str) -> None:
+    values = {"status": status, "updated_at": utcnow(), "updated_by": by}
+    if conn.execute(update(seller_status).where(seller_status.c.seller_origin == origin).values(**values)).rowcount == 0:
+        conn.execute(insert(seller_status).values(seller_origin=origin, **values))
+
+
 class Repository:
     def __init__(self, database_url: str) -> None:
         self.is_postgres = database_url.startswith("postgresql")
@@ -216,7 +389,27 @@ class Repository:
         if self.is_postgres:
             with self.engine.begin() as conn:
                 conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{PG_SCHEMA}"'))
-        metadata.create_all(self.engine)
+        metadata.create_all(self.engine)   # creates missing tables, never changes existing ones
+        if added := self.add_missing_columns():
+            log.info("added columns: %s", ", ".join(added))
+
+    def add_missing_columns(self) -> list[str]:
+        """Add columns that the code defines but an existing table does not have yet (e.g. in Supabase).
+        Additive only: never drops or renames. New NOT NULL columns must have a server_default."""
+        schema = PG_SCHEMA if self.is_postgres else None
+        quote = self.engine.dialect.identifier_preparer.quote
+        existing = inspect(self.engine)
+        added = []
+        with self.engine.begin() as conn:
+            for table in metadata.sorted_tables:
+                have = {c["name"] for c in existing.get_columns(table.name, schema=schema)}
+                target = f"{quote(schema)}.{quote(table.name)}" if schema else quote(table.name)
+                for column in table.columns:
+                    if column.name not in have:
+                        ddl = CreateColumn(column).compile(dialect=self.engine.dialect)
+                        conn.execute(text(f"ALTER TABLE {target} ADD COLUMN {ddl}"))
+                        added.append(f"{table.name}.{column.name}")
+        return added
 
     def seed_agents(self, agent_ids) -> None:
         for agent_id in agent_ids:
@@ -237,10 +430,52 @@ class Repository:
     @contextmanager
     def agent_tx(self, agent_id: str) -> Iterator[AgentTx]:
         with self.engine.begin() as conn:
+
             # Row lock: serialises decisions for this agent across all API instances (no-op on SQLite).
             conn.execute(select(agent_state.c.agent_id)
                          .where(agent_state.c.agent_id == agent_id).with_for_update())
             yield AgentTx(conn, agent_id)
+
+    def record_links(self, *, event_id: str, agent_id: str, origin: str, links: list[str]) -> None:
+        """Every link in a paid response, so a later purchase of that link can be traced back."""
+        now = utcnow()
+        with self.engine.begin() as conn:
+            for url in links:
+                conn.execute(insert(content_links).values(id=new_id(), url_normalized=url, source_event_id=event_id,
+                                                          seller_origin=origin, agent_id=agent_id, created_at=now))
+
+    def seller_overview(self) -> dict[str, dict]:
+        """Status and incident count for every seller HAL knows about, keyed by origin."""
+        with self.engine.connect() as conn:
+            statuses = {r["seller_origin"]: dict(r) for r in conn.execute(select(seller_status)).mappings()}
+            counts = dict(conn.execute(select(seller_incidents.c.seller_origin, func.count())
+                                       .group_by(seller_incidents.c.seller_origin)).all())
+        return {origin: {"status": statuses.get(origin, {}).get("status", "active"),
+                         "incidents": int(counts.get(origin, 0)),
+                         "updated_at": statuses.get(origin, {}).get("updated_at"),
+                         "updated_by": statuses.get(origin, {}).get("updated_by")}
+                for origin in set(statuses) | set(counts)}
+
+    def restore_seller(self, origin: str, by: str) -> None:
+        with self.engine.begin() as conn:
+            _set_seller_status(conn, origin, "active", by)
+
+    def store_payload(self, event_id: str, data, ttl_seconds: int) -> bool:
+        """Keep a paid result for reuse (max 256 KB). Expired results are deleted on the way."""
+        body = json.dumps(data, default=str)
+        if len(body.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+            return False
+        now = utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(delete(purchase_payloads).where(purchase_payloads.c.expires_at <= now))
+            conn.execute(insert(purchase_payloads).values(event_id=event_id, body_json=body,
+                                                          expires_at=now + timedelta(seconds=ttl_seconds)))
+        return True
+
+    def record_content_flags(self, event_id: str, flags: list[dict]) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(event_details).where(event_details.c.event_id == event_id)
+                         .values(content_flags_json=json.dumps(flags)))
 
     def finish_event(self, event_id: str, *, status: str, decision: str | None = None,
                      reason: str | None = None, reason_code: str | None = None, tx: str | None = None) -> None:
@@ -287,12 +522,16 @@ class Repository:
                 "allowed_tools": json.loads(r["allowed_tools"]),
                 "per_task_cap": from_micros(r["per_task_cap_micros"]), "daily_cap": from_micros(r["daily_cap_micros"]),
                 "approval_above": from_micros(r["approval_above_micros"]), "active": bool(r["active"]),
+                "max_repeats": r["max_repeats"], "repeat_window_minutes": r["repeat_window_minutes"],
+                "max_attempts_per_min": r["max_attempts_per_min"], "velocity_share_10m": r["velocity_share_10m"],
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
     @staticmethod
     def _item_row(r) -> dict:
         return {"tool": r["tool"], "name": r["name"], "description": r["description"] or "", "vendor": r["vendor"],
                 "url": r["url"], "price": from_micros(r["price_micros"]), "active": bool(r["active"]),
+                "content_policy": r["content_policy"], "reuse_ttl_seconds": r["reuse_ttl_seconds"],
+                "reuse_scope": r["reuse_scope"],
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
     @staticmethod
@@ -308,7 +547,9 @@ class Repository:
     def _item_values(i: dict) -> dict:
         return {"tool": i["tool"], "name": i.get("name") or i["tool"], "description": i.get("description") or "",
                 "vendor": i["vendor"], "url": i["url"], "price_micros": to_micros(Decimal(str(i["price"]))),
-                "active": i.get("active", True)}
+                "active": i.get("active", True), "content_policy": i.get("content_policy") or "annotate",
+                "reuse_ttl_seconds": int(i.get("reuse_ttl_seconds") or 0),
+                "reuse_scope": i.get("reuse_scope") or "agent"}
 
     def list_agents(self) -> list[dict]:
         with self.engine.connect() as conn:
@@ -379,7 +620,8 @@ class Repository:
         """Clear purchases and approvals, put the starting rules back, release every kill switch.
         Sign-ups and the change history are kept."""
         with self.engine.begin() as conn:
-            for table in (events, approvals, agents, catalog_items, agent_state):
+            for table in (events, approvals, agents, catalog_items, agent_state, event_details, purchase_payloads,
+                          content_links, seller_status, seller_incidents, claims):
                 conn.execute(delete(table))
             self._insert_seed(conn, seed)
 
@@ -415,9 +657,32 @@ class Repository:
         return dict(row) if row else None
 
     def recent_events(self, limit: int = 60) -> list[dict]:
+        q = (select(events, event_details.c.caused_by_event_id, event_details.c.reused_from_event_id,
+                    event_details.c.content_flags_json)
+             .select_from(events.outerjoin(event_details, event_details.c.event_id == events.c.id))
+             .order_by(events.c.created_at.desc()).limit(limit))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(events).order_by(events.c.created_at.desc()).limit(limit)).mappings().all()
+            rows = conn.execute(q).mappings().all()
         return [dict(r) for r in rows]
+
+    def saved(self, agent_id: str, *, since: datetime) -> tuple[Decimal, int]:
+        """Reused purchases since a time: what the original purchases cost, and how many there were."""
+        original = events.alias("original")
+        q = (select(func.coalesce(func.sum(original.c.amount_micros), 0), func.count())
+             .select_from(events.join(event_details, event_details.c.event_id == events.c.id)
+                          .join(original, original.c.id == event_details.c.reused_from_event_id))
+             .where(events.c.agent_id == agent_id, events.c.status == "reused", events.c.created_at >= since))
+        with self.engine.connect() as conn:
+            micros, count = conn.execute(q).one()
+        return from_micros(micros), count
+
+    def frozen_reason(self, agent_id: str) -> str | None:
+        """The message of the newest stop: the kill switch by hand, or the circuit breaker."""
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(events.c.reason).where(events.c.agent_id == agent_id, events.c.status == "control",
+                                              events.c.reason_code.in_(("kill_switch_on", "circuit_breaker")))
+                .order_by(events.c.created_at.desc()).limit(1)).scalar()
 
     def is_frozen(self, agent_id: str) -> bool:
         return self.frozen_map().get(agent_id, False)
@@ -448,17 +713,22 @@ class Repository:
             return conn.execute(delete(early_access).where(early_access.c.email == email)).rowcount == 1
 
     def export_csv(self) -> str:
-        """Paid purchases as a plain CSV: comma-separated, decimal point, one row per payment."""
+        """Delivered purchases as a plain CSV: comma-separated, decimal point. One row per payment, and one row
+        per reused purchase (0.00, with the reference of the payment whose result it reused)."""
+        q = (select(events, event_details.c.reused_from_event_id)
+             .select_from(events.outerjoin(event_details, event_details.c.event_id == events.c.id))
+             .where(events.c.status.in_(("settled", "reused"))).order_by(events.c.created_at))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(events).where(events.c.status == "settled")
-                                .order_by(events.c.created_at)).mappings().all()
+            rows = conn.execute(q).mappings().all()
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
         w.writerow(["Date (UTC)", "Agent", "Task", "Item", "Seller", "Amount", "Currency", "Reference",
-                    "Solana receipt"])
+                    "Solana receipt", "Status", "Reused from"])
         for r in rows:
             created = r["created_at"] if r["created_at"].tzinfo else r["created_at"].replace(tzinfo=timezone.utc)
+            reused = r["status"] == "reused"
             w.writerow([created.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), r["agent_id"], r["task_id"],
                         r["tool"] or "", r["vendor"] or "", money(r["amount_micros"]), "USDC", f"AB-{r['id']}",
-                        r["tx"] or ""])
+                        "" if reused else r["tx"] or "", "reused" if reused else "paid",
+                        f"AB-{r['reused_from_event_id']}" if reused and r["reused_from_event_id"] else ""])
         return buf.getvalue()

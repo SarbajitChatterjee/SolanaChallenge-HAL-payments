@@ -5,3 +5,9 @@ __pycache__/
 .env
 .wallets/
 .pytest_cache/
+package-lock.json
+
+# web app copy in frontend/
+frontend/node_modules/
+frontend/.output/
+frontend/dist/

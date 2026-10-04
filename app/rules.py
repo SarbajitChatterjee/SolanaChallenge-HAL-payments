@@ -52,7 +52,7 @@ def _text(field: str, value, *, required: bool, max_len: int) -> str:
 
 def _url(value) -> str:
     url = _text("url", value, required=True, max_len=2000)
-    if url.startswith("{vendor_base}/"):
+    if url.startswith(("{vendor_base}/", "{news_base}/")):
         return url
     if url.startswith("https://"):
         return url
@@ -62,7 +62,7 @@ def _url(value) -> str:
 
 
 class Rules:
-    def __init__(self, repo: Repository, vendor_base: str, seed_path: str | None = None) -> None:
+    def __init__(self, repo: Repository, vendor_base: dict[str, str] | str, seed_path: str | None = None) -> None:
         self.repo = repo
         self.vendor_base = vendor_base
         self.seed_path = seed_path
