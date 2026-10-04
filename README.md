@@ -8,7 +8,7 @@ An AI agent asks HAL before it buys. HAL checks the purchase, pays the seller, c
 - **API docs:** https://agentbudget-api-n9y6.onrender.com/docs
 - Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). Formerly "AgentBudget", so some service and database names still say `agentbudget`.
 
-![HAL: how a purchase flows](docs/architecture.png)
+![HAL: how a purchase flows](docs/architecture.svg)
 
 ## Try it in 3 minutes
 
