@@ -4,6 +4,7 @@
 
 An AI agent asks HAL before it buys. HAL checks the purchase, pays the seller, checks what the seller sends back, and gives the agent the data, flagged or cleaned where it looks suspicious, or a clear no. A person sets the rules and can stop any agent with one switch.
 
+- **The Challenge:** https://superteam.fun/earn/listing/build-at-whu/
 - **Live app:** https://solana-hal-payments.lovable.app/
 - **API docs:** https://agentbudget-api-n9y6.onrender.com/docs
 - Built for Superteam Germany's *Build an MVP with Solana at WHU* (2026). It's a hackathon MVP. Formerly "AgentBudget", so some service and database names still say `agentbudget`.
